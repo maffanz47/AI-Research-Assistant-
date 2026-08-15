@@ -139,6 +139,7 @@ def _write_neighbourhood_cache(norm_id: str, data: dict[str, Any]) -> None:
         logger.warning("Failed to write neighbourhood cache %s: %s", filepath, exc)
 
 
+
 # ---------------------------------------------------------------------------
 # HTTP utilities
 # ---------------------------------------------------------------------------
@@ -150,7 +151,7 @@ def _http_request(
     json_data: Optional[dict[str, Any]] = None,
     api_key: Optional[str] = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
-    """HTTP request with exponential backoff on 429 / 5xx responses."""
+    """HTTP request with Retry-After header support and backoff on 429 / 5xx."""
     headers = {"x-api-key": api_key} if api_key else {}
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -158,13 +159,16 @@ def _http_request(
                 method, url, params=params, json=json_data, headers=headers, timeout=30
             )
             if resp.status_code == 429:
-                wait = BACKOFF_BASE ** attempt
+                # Use server-provided retry delay if available, otherwise exponential backoff
+                retry_after = resp.headers.get("Retry-After")
+                wait = int(retry_after) if retry_after and retry_after.isdigit() else max(5, BACKOFF_BASE ** attempt * 2)
                 logger.warning(
-                    "Rate-limited (429). Retrying in %ss (attempt %d/%d).",
+                    "Rate-limited (429). Waiting %ss before retry (attempt %d/%d).",
                     wait, attempt, MAX_RETRIES,
                 )
                 time.sleep(wait)
                 continue
+
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.RequestException as exc:
@@ -179,7 +183,6 @@ def _http_request(
             )
             time.sleep(wait)
     return {}
-
 
 def _clean_paper(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw API paper dict into a standard shape."""
@@ -204,7 +207,7 @@ def _clean_paper(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _paginate(url: str, fields: str, api_key: Optional[str] = None) -> list[dict[str, Any]]:
-    """Iterate all pages from a Semantic Scholar list endpoint."""
+    """Iterate all pages from a Semantic Scholar list endpoint with gentle pacing."""
     results: list[dict[str, Any]] = []
     offset = 0
     while True:
@@ -221,8 +224,12 @@ def _paginate(url: str, fields: str, api_key: Optional[str] = None) -> list[dict
         if not next_offset or not data:
             break
         offset = next_offset
-    return results
 
+        # Polite delay when unauthenticated to stay safely within the 100 req / 5 min limit
+        if not api_key:
+            time.sleep(1.0)
+
+    return results
 
 # ---------------------------------------------------------------------------
 # Public client
