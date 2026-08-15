@@ -1,0 +1,33 @@
+schema: '2.0'
+stages:
+  train:
+    cmd: python train.py --dataset_dir cache/ --output_dir lora_adapter/
+    deps:
+    - path: cache/
+      hash: md5
+      md5: c1d70efeb75df783a36db4241ce29788.dir
+      size: 39468
+      nfiles: 1
+    - path: train.py
+      hash: md5
+      md5: dfc8daca0f62a8f084e72f90634caf92
+      size: 12782
+    params:
+      params.yaml:
+        train.gradient_accumulation_steps: 4
+        train.learning_rate: 0.0002
+        train.lora_alpha: 16
+        train.lora_r: 16
+        train.max_seq_length: 8192
+        train.num_train_epochs: 3
+        train.per_device_train_batch_size: 4
+    outs:
+    - path: lora_adapter/
+      hash: md5
+      md5: 5eb0cc495ea278cf595e60097eeec0c0.dir
+      size: 714146129
+      nfiles: 17
+    - path: metrics.json
+      hash: md5
+      md5: c96c3eff13523a738543b7cfb3d4ab47
+      size: 198

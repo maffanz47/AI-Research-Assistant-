@@ -47,3 +47,4 @@ lora_adapter/
 .DS_Store
 Thumbs.db
 /cache
+/lora_adapter
