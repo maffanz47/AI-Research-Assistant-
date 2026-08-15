@@ -342,11 +342,14 @@ else:
                     pipe_resp = requests.post(
                         f"{PIPELINE_API}/analyze",
                         json={"paper_id": pid},
-                        timeout=120,
+                        timeout=600,
                     )
                 except requests.exceptions.ConnectionError:
                     st.error("Pipeline API is offline. Start it with:\n"
                              "`uvicorn api:app --port 8000`")
+                    st.stop()
+                except requests.exceptions.ReadTimeout:
+                    st.error("Pipeline API timed out (took > 10 minutes). The citation network might be too large.")
                     st.stop()
 
             if pipe_resp.status_code != 200:
