@@ -230,7 +230,8 @@ def main() -> None:
             report_to="none",       # we handle logging ourselves via MLflow
         )
 
-        # ── SFT Trainer ───────────────────────────────────────────────────
+
+# ── SFT Trainer ───────────────────────────────────────────────────
         class _MLflowLoggingCallback:
             """Minimal HF-compatible callback that pushes loss to MLflow."""
             def on_log(self, _args, state, _control, logs=None, **_kwargs):
@@ -241,7 +242,7 @@ def main() -> None:
 
         trainer = SFTTrainer(
             model=model,
-            tokenizer=tokenizer,
+            # tokenizer=tokenizer,  <-- REMOVE OR COMMENT OUT THIS LINE
             train_dataset=hf_dataset,
             dataset_text_field="text",
             max_seq_length=args.max_seq_length,
@@ -249,7 +250,6 @@ def main() -> None:
             args=training_args,
             callbacks=[_MLflowLoggingCallback()],
         )
-
         # ── Train ─────────────────────────────────────────────────────────
         logger.info("Starting training …")
         train_result = trainer.train()
