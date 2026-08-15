@@ -154,12 +154,10 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # ── MLflow setup ──────────────────────────────────────────────────────
-    mlflow.set_tracking_uri(args.mlflow_uri)
-    mlflow.set_experiment(args.mlflow_experiment)
-
-    with mlflow.start_run(run_name="qwen2.5-14b-lora") as run:
-        logger.info("MLflow run ID: %s", run.info.run_id)
+    # ── No MLflow setup ───────────────────────────────────────────────────
+    # MLflow tracking has been disabled to prevent artifact URI crashes.
+    if True:
+        logger.info("Starting local training without MLflow...")
 
         hparams = {
             "base_model": "unsloth/Qwen2.5-14B-Instruct",
@@ -176,8 +174,8 @@ def main() -> None:
             "dataset_dir": args.dataset_dir,
             "output_dir": args.output_dir,
         }
-        mlflow.log_params(hparams)
-        logger.info("Hyperparameters logged to MLflow.")
+        # mlflow.log_params(hparams)
+        logger.info("Hyperparameters logged locally.")
 
         # ── Load model & tokenizer ────────────────────────────────────────
         logger.info("Loading unsloth/Qwen2.5-14B-Instruct …")
@@ -212,7 +210,7 @@ def main() -> None:
 
         # ── Dataset ───────────────────────────────────────────────────────
         raw_examples = build_training_examples(args.dataset_dir)
-        mlflow.log_metric("dataset_size", len(raw_examples))
+        # mlflow.log_metric("dataset_size", len(raw_examples))
 
         def format_example(ex: dict[str, str]) -> dict[str, str]:
             messages = [
@@ -257,15 +255,13 @@ def main() -> None:
             train_dataset=hf_dataset,
             args=training_args,
             processing_class=tokenizer,
-            callbacks=[_MLflowLoggingCallback()],
+            callbacks=[],
         )
 
         # ── Train ─────────────────────────────────────────────────────────
         logger.info("Starting training …")
         train_result = trainer.train()
-        mlflow.log_metrics(
-            {k: v for k, v in train_result.metrics.items() if isinstance(v, (int, float))}
-        )
+        # mlflow.log_metrics(...)
 
         # Write metrics to a local file for DVC to track
         with open("metrics.json", "w", encoding="utf-8") as f:
@@ -277,17 +273,13 @@ def main() -> None:
         tokenizer.save_pretrained(str(output_path))
         logger.info("LoRA adapter saved to %s", output_path)
 
-        mlflow.log_artifacts(str(output_path), artifact_path="lora_adapter")
-        logger.info("LoRA adapter logged as MLflow artifact.")
+        # mlflow.log_artifacts(str(output_path), artifact_path="lora_adapter")
+        logger.info("LoRA adapter saved locally.")
 
         logger.info(
             "✅ Fine-tuning complete.\n"
-            "   Run ID      : %s\n"
-            "   Adapter path: %s\n"
-            "   MLflow URI  : %s",
-            run.info.run_id,
+            "   Adapter path: %s",
             output_path.resolve(),
-            args.mlflow_uri,
         )
 
 
