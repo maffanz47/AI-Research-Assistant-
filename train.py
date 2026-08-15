@@ -116,7 +116,9 @@ def build_training_examples(dataset_dir: str) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 # Global Callbacks
 # ---------------------------------------------------------------------------
-class _MLflowLoggingCallback:
+from transformers import TrainerCallback
+
+class _MLflowLoggingCallback(TrainerCallback):
     """Minimal HF-compatible callback that pushes loss to MLflow."""
     def on_log(self, _args, state, _control, logs=None, **_kwargs):
         if logs and state.global_step:
