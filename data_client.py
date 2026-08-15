@@ -140,6 +140,7 @@ def _write_neighbourhood_cache(norm_id: str, data: dict[str, Any]) -> None:
 
 
 
+
 # ---------------------------------------------------------------------------
 # HTTP utilities
 # ---------------------------------------------------------------------------
@@ -151,7 +152,7 @@ def _http_request(
     json_data: Optional[dict[str, Any]] = None,
     api_key: Optional[str] = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
-    """HTTP request with Retry-After header support and backoff on 429 / 5xx."""
+    """HTTP request with global 1-request-per-second pacing and 429 backoff."""
     headers = {"x-api-key": api_key} if api_key else {}
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -159,7 +160,6 @@ def _http_request(
                 method, url, params=params, json=json_data, headers=headers, timeout=30
             )
             if resp.status_code == 429:
-                # Use server-provided retry delay if available, otherwise exponential backoff
                 retry_after = resp.headers.get("Retry-After")
                 wait = int(retry_after) if retry_after and retry_after.isdigit() else max(5, BACKOFF_BASE ** attempt * 2)
                 logger.warning(
@@ -170,6 +170,10 @@ def _http_request(
                 continue
 
             resp.raise_for_status()
+            
+            # STRICT PACING: Enforce the 1 request/second API limit safely
+            time.sleep(1.1) 
+            
             return resp.json()
         except requests.exceptions.RequestException as exc:
             if attempt == MAX_RETRIES:
@@ -184,6 +188,27 @@ def _http_request(
             time.sleep(wait)
     return {}
 
+
+def _paginate(url: str, fields: str, api_key: Optional[str] = None) -> list[dict[str, Any]]:
+    """Iterate all pages from a Semantic Scholar list endpoint."""
+    results: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        payload = _http_request(
+            "GET", url,
+            params={"fields": fields, "limit": PAGE_LIMIT, "offset": offset},
+            api_key=api_key,
+        )
+        if not isinstance(payload, dict):
+            break
+        data: list[dict[str, Any]] = payload.get("data", [])
+        results.extend(data)
+        next_offset = payload.get("next")
+        if not next_offset or not data:
+            break
+        offset = next_offset
+
+    return results
 def _clean_paper(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw API paper dict into a standard shape."""
     if not isinstance(raw, dict):
@@ -206,30 +231,6 @@ def _clean_paper(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _paginate(url: str, fields: str, api_key: Optional[str] = None) -> list[dict[str, Any]]:
-    """Iterate all pages from a Semantic Scholar list endpoint with gentle pacing."""
-    results: list[dict[str, Any]] = []
-    offset = 0
-    while True:
-        payload = _http_request(
-            "GET", url,
-            params={"fields": fields, "limit": PAGE_LIMIT, "offset": offset},
-            api_key=api_key,
-        )
-        if not isinstance(payload, dict):
-            break
-        data: list[dict[str, Any]] = payload.get("data", [])
-        results.extend(data)
-        next_offset = payload.get("next")
-        if not next_offset or not data:
-            break
-        offset = next_offset
-
-        # Polite delay when unauthenticated to stay safely within the 100 req / 5 min limit
-        if not api_key:
-            time.sleep(1.0)
-
-    return results
 
 # ---------------------------------------------------------------------------
 # Public client
