@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables (never commit real secrets)
+.env
+
+# Unsloth / HuggingFace model cache
+~/.cache/huggingface/
+
+# MLflow artifacts (logged to server, not git)
+mlruns/
+mlartifacts/
+
+# LoRA adapter output (tracked by DVC, not git)
+lora_adapter/
+
+# DVC internals
+.dvc/cache/
+.dvc/tmp/
+
+# Local data caches
+.data_cache/
+
+# Streamlit
+.streamlit/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

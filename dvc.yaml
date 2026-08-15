@@ -1,0 +1,20 @@
+stages:
+  train:
+    cmd: python train.py --dataset_dir cache/ --output_dir lora_adapter/
+    deps:
+      - cache/
+      - train.py
+    outs:
+      - lora_adapter/
+    metrics:
+      - metrics.json:
+          cache: false
+    params:
+      - params.yaml:
+          - train.max_seq_length
+          - train.per_device_train_batch_size
+          - train.gradient_accumulation_steps
+          - train.num_train_epochs
+          - train.learning_rate
+          - train.lora_r
+          - train.lora_alpha
