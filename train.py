@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 train.py
 ========
@@ -17,7 +16,7 @@ Usage
 
 Environment variables (optional, can also be set in .env)
   MLFLOW_TRACKING_URI  default: http://localhost:5000
-  HF_TOKEN            HuggingFace token if model is gated
+  HF_TOKEN             HuggingFace token if model is gated
 """
 
 from __future__ import annotations
@@ -59,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Gradient accumulation steps")
     p.add_argument("--num_train_epochs", type=int, default=3, help="Number of training epochs")
     p.add_argument("--learning_rate", type=float, default=2e-4, help="Learning rate")
-    p.add_argument("--warmup_ratio", type=float, default=0.05, help="Warmup ratio")
+    p.add_argument("--warmup_steps", type=int, default=5, help="Warmup steps")
     p.add_argument("--mlflow_uri", default=os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
     p.add_argument("--mlflow_experiment", default="research-gap-finder-finetune")
     return p.parse_args()
@@ -73,10 +72,6 @@ def build_training_examples(dataset_dir: str) -> list[dict[str, str]]:
     """
     Walk the cache/ directory and convert neighbourhood JSON files into
     instruction-tuning examples.
-
-    Each example is a (instruction, response) pair:
-    - instruction : seed paper title + branch summaries prompt
-    - response    : a short gap analysis (synthesized from metadata)
     """
     examples: list[dict[str, str]] = []
     dataset_path = Path(dataset_dir)
@@ -97,14 +92,12 @@ def build_training_examples(dataset_dir: str) -> list[dict[str, str]]:
             abstract = seed.get("abstract", "")
             citations = data.get("citations", [])
 
-            # Build a short instruction from the neighbourhood
             instruction = (
                 f"Analyse the citation neighbourhood of the paper: '{title}'.\n"
                 f"Abstract: {abstract[:400]}\n"
                 f"Forward citations found: {len(citations)}.\n"
                 f"Identify the top 3 unexplored research gaps."
             )
-            # Synthesize a pseudo-response (replace with human annotations in production)
             response = (
                 f"Based on the neighbourhood of '{title}', "
                 f"three key research gaps are:\n"
@@ -121,20 +114,36 @@ def build_training_examples(dataset_dir: str) -> list[dict[str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# Global Callbacks
+# ---------------------------------------------------------------------------
+class _MLflowLoggingCallback:
+    """Minimal HF-compatible callback that pushes loss to MLflow."""
+    def on_log(self, _args, state, _control, logs=None, **_kwargs):
+        if logs and state.global_step:
+            for k, v in logs.items():
+                if isinstance(v, (int, float)):
+                    try:
+                        import mlflow
+                        mlflow.log_metric(k, v, step=state.global_step)
+                    except:
+                        pass
+
+
+# ---------------------------------------------------------------------------
 # Main training routine
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     args = parse_args()
 
-    # ── Import heavy dependencies (after args validated) ─────────────────
+    # ── Import heavy dependencies ─────────────────────────────────────────
     try:
-        import mlflow
+	from unsloth import FastModel, is_bfloat16_supported
+	import mlflow
         import torch
         from datasets import Dataset
-        from transformers import TrainingArguments
-        from trl import SFTTrainer
-        from unsloth import FastModel, is_bfloat16_supported
+        from trl import SFTTrainer, SFTConfig
+        
     except ImportError as exc:
         logger.error(
             "Missing dependency: %s\n"
@@ -150,7 +159,6 @@ def main() -> None:
     with mlflow.start_run(run_name="qwen2.5-14b-lora") as run:
         logger.info("MLflow run ID: %s", run.info.run_id)
 
-        # Log all hyperparameters
         hparams = {
             "base_model": "unsloth/Qwen2.5-14B-Instruct",
             "max_seq_length": args.max_seq_length,
@@ -161,7 +169,7 @@ def main() -> None:
             "gradient_accumulation_steps": args.gradient_accumulation_steps,
             "num_train_epochs": args.num_train_epochs,
             "learning_rate": args.learning_rate,
-            "warmup_ratio": args.warmup_ratio,
+            "warmup_steps": args.warmup_steps,
             "bf16": is_bfloat16_supported(),
             "dataset_dir": args.dataset_dir,
             "output_dir": args.output_dir,
@@ -174,9 +182,16 @@ def main() -> None:
         model, tokenizer = FastModel.from_pretrained(
             model_name="unsloth/Qwen2.5-14B-Instruct",
             max_seq_length=args.max_seq_length,
-            dtype=None,           # auto (bfloat16 if supported)
-            load_in_4bit=True,    # QLoRA — fits 14B in 24 GB VRAM
+            dtype=None,             
+            load_in_4bit=True,      
         )
+
+        # 🔴 CRITICAL TRL COMPATIBILITY FIX: 
+        # Overwrite placeholder tokens with actual Qwen2.5 vocabulary tokens
+        if tokenizer.eos_token == "<EOS_TOKEN>" or tokenizer.eos_token is None:
+            tokenizer.eos_token = "<|im_end|>"
+        if tokenizer.pad_token == "<EOS_TOKEN>" or tokenizer.pad_token is None:
+            tokenizer.pad_token = "<|im_end|>"
 
         # ── Apply LoRA ────────────────────────────────────────────────────
         model = FastModel.get_peft_model(
@@ -189,7 +204,7 @@ def main() -> None:
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,
             bias="none",
-            use_gradient_checkpointing="unsloth",  # memory-efficient checkpointing
+            use_gradient_checkpointing="unsloth",
             random_state=42,
         )
 
@@ -197,7 +212,6 @@ def main() -> None:
         raw_examples = build_training_examples(args.dataset_dir)
         mlflow.log_metric("dataset_size", len(raw_examples))
 
-        # Format using Qwen chat template
         def format_example(ex: dict[str, str]) -> dict[str, str]:
             messages = [
                 {"role": "system", "content": "You are an expert research analyst."},
@@ -212,12 +226,12 @@ def main() -> None:
         hf_dataset = Dataset.from_list([format_example(e) for e in raw_examples])
         logger.info("Dataset formatted: %d examples", len(hf_dataset))
 
-        # ── TrainingArguments (24 GB GPU profile) ─────────────────────────
-        training_args = TrainingArguments(
+        # ── SFTConfig ─────────────────────────────────────────────────────
+        training_args = SFTConfig(
             output_dir=args.output_dir,
             per_device_train_batch_size=args.per_device_train_batch_size,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
-            warmup_ratio=args.warmup_ratio,
+            warmup_steps=args.warmup_steps,
             num_train_epochs=args.num_train_epochs,
             learning_rate=args.learning_rate,
             fp16=not is_bfloat16_supported(),
@@ -227,29 +241,23 @@ def main() -> None:
             weight_decay=0.01,
             lr_scheduler_type="cosine",
             seed=42,
-            report_to="none",       # we handle logging ourselves via MLflow
+            report_to="none",       
+            dataset_text_field="text",
+            max_length=args.max_seq_length, 
+            dataset_num_proc=None,          # Bypasses Unsloth pickling pool crash
+            packing=False,
+            eos_token = "<|im_end|>",
         )
 
-
-# ── SFT Trainer ───────────────────────────────────────────────────
-        class _MLflowLoggingCallback:
-            """Minimal HF-compatible callback that pushes loss to MLflow."""
-            def on_log(self, _args, state, _control, logs=None, **_kwargs):
-                if logs and state.global_step:
-                    for k, v in logs.items():
-                        if isinstance(v, (int, float)):
-                            mlflow.log_metric(k, v, step=state.global_step)
-
+        # ── SFT Trainer ───────────────────────────────────────────────────
         trainer = SFTTrainer(
             model=model,
-            # tokenizer=tokenizer,  <-- REMOVE OR COMMENT OUT THIS LINE
             train_dataset=hf_dataset,
-            dataset_text_field="text",
-            max_seq_length=args.max_seq_length,
-            dataset_num_proc=2,
             args=training_args,
+            processing_class=tokenizer,
             callbacks=[_MLflowLoggingCallback()],
         )
+
         # ── Train ─────────────────────────────────────────────────────────
         logger.info("Starting training …")
         train_result = trainer.train()
@@ -265,11 +273,9 @@ def main() -> None:
         tokenizer.save_pretrained(str(output_path))
         logger.info("LoRA adapter saved to %s", output_path)
 
-        # Log adapter directory as MLflow artifact
         mlflow.log_artifacts(str(output_path), artifact_path="lora_adapter")
         logger.info("LoRA adapter logged as MLflow artifact.")
 
-        # Summarise
         logger.info(
             "✅ Fine-tuning complete.\n"
             "   Run ID      : %s\n"
