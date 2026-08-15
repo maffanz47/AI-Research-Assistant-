@@ -23,9 +23,13 @@ env/
 # MLflow artifacts (logged to server, not git)
 mlruns/
 mlartifacts/
+mlflow.db
 
 # LoRA adapter output (tracked by DVC, not git)
 lora_adapter/
+
+# Unsloth compiled kernel cache (auto-generated, not needed in git)
+unsloth_compiled_cache/
 
 # DVC internals
 .dvc/cache/
