@@ -143,9 +143,15 @@ class CitationMeta(BaseModel):
     intents: list[str] = Field(default_factory=list)
 
 
+class SeedPaper(BaseModel):
+    title: str
+    abstract: str
+
+
 class AnalyzeGapRequest(BaseModel):
-    title: str = Field(..., description="Seed paper title")
-    abstract: str = Field(..., description="Seed paper abstract")
+    seed_papers: list[SeedPaper] = Field(default_factory=list, description="List of seed papers to analyze collectively")
+    title: str = Field(default="", description="Seed paper title (legacy)")
+    abstract: str = Field(default="", description="Seed paper abstract (legacy)")
     citations: list[CitationMeta] = Field(
         default_factory=list,
         description="List of forward-citing papers with metadata",
@@ -165,7 +171,7 @@ class ResearchGap(BaseModel):
 
 
 class AnalyzeGapResponse(BaseModel):
-    seed_title: str
+    seed_titles: list[str]
     executive_summary: str
     gaps: list[ResearchGap]
     model_used: str
@@ -184,17 +190,34 @@ def _strip_fences(text: str) -> str:
 
 
 def _build_prompt(req: AnalyzeGapRequest) -> str:
+    seeds = req.seed_papers
+    if not seeds and req.title:
+        seeds = [SeedPaper(title=req.title, abstract=req.abstract)]
+
+    seeds_text = "\n\n".join(
+        f"Paper {i+1}:\nTitle: \"{p.title}\"\nAbstract: {p.abstract[:600]}"
+        for i, p in enumerate(seeds)
+    )
+
     citation_lines = "\n".join(
         f"  [{i+1}] {c.title} (cited by {c.citation_count}, influential={c.is_influential})"
         for i, c in enumerate(req.citations[:30])   # cap at 30 to stay within context
     )
-    return (
+
+    prompt = (
         f"You are an expert academic research analyst.\n\n"
-        f"Seed Paper: \"{req.title}\"\n"
-        f"Abstract: {req.abstract[:600]}\n\n"
-        f"Forward citations ({len(req.citations)} total, showing first 30):\n"
-        f"{citation_lines}\n\n"
-        f"Task: Identify the top 3 unexplored research gaps based on the citation landscape.\n"
+        f"You have been provided with the following seed paper(s):\n"
+        f"{seeds_text}\n\n"
+    )
+
+    if req.citations:
+        prompt += (
+            f"Forward citations ({len(req.citations)} total, showing first 30):\n"
+            f"{citation_lines}\n\n"
+        )
+
+    prompt += (
+        f"Task: Identify the top 3 unexplored research gaps based on the collective landscape of the provided paper(s) and any provided citations.\n"
         f"Return ONLY valid JSON — no prose, no markdown fences — matching this schema:\n"
         f"{{\n"
         f'  "executive_summary": "<2-3 sentence summary>",\n'
@@ -203,12 +226,13 @@ def _build_prompt(req: AnalyzeGapRequest) -> str:
         f'      "gap_id": 1,\n'
         f'      "title": "<gap name>",\n'
         f'      "description": "<what is missing>",\n'
-        f'      "evidence": "<which citing papers suggest this gap>",\n'
+        f'      "evidence": "<which papers or lack thereof suggest this gap>",\n'
         f'      "recommended_action": "<what researcher should do>"\n'
         f'    }}\n'
         f"  ]\n"
         f"}}"
     )
+    return prompt
 
 
 def _mock_response(req: AnalyzeGapRequest) -> dict[str, Any]:
@@ -313,12 +337,14 @@ def analyze_gap(req: AnalyzeGapRequest) -> AnalyzeGapResponse:
     Accepts seed paper title + abstract + citation metadata.
     Returns structured JSON with executive summary and gap list.
     """
-    if not req.title.strip():
-        raise HTTPException(status_code=422, detail="`title` must not be empty.")
-    if not req.abstract.strip():
-        raise HTTPException(status_code=422, detail="`abstract` must not be empty.")
+    if not req.seed_papers and (not req.title.strip() or not req.abstract.strip()):
+        raise HTTPException(status_code=422, detail="Provide at least one seed paper or a title/abstract.")
 
-    logger.info("Running gap analysis for: %s", req.title[:60])
+    seeds = req.seed_papers
+    if not seeds and req.title:
+        seeds = [SeedPaper(title=req.title, abstract=req.abstract)]
+
+    logger.info("Running gap analysis for %d seed papers", len(seeds))
 
     try:
         raw_output = _run_inference(req)
@@ -342,7 +368,7 @@ def analyze_gap(req: AnalyzeGapRequest) -> AnalyzeGapResponse:
     model_label = f"{BASE_MODEL} + LoRA" if not USE_MOCK_LLM else "Mock (dev mode)"
 
     return AnalyzeGapResponse(
-        seed_title=req.title,
+        seed_titles=[p.title for p in seeds],
         executive_summary=raw_output.get("executive_summary", "Summary unavailable."),
         gaps=gaps,
         model_used=model_label,

@@ -23,6 +23,7 @@ import time
 
 import requests
 import streamlit as st
+import pandas as pd
 
 # ---------------------------------------------------------------------------
 # Config
@@ -122,7 +123,7 @@ with st.sidebar:
 
     mode = st.radio(
         "Input Mode",
-        options=["📝 Manual (Title + Abstract)", "🔗 Auto (arXiv / DOI ID)"],
+        options=["📝 Manual (Single)", "📚 Batch (Series of Papers)", "🔗 Auto (arXiv / DOI ID)"],
         index=0,
     )
 
@@ -205,10 +206,11 @@ def _render_results(data: dict) -> None:
             unsafe_allow_html=True,
         )
     with c3:
-        seed = data.get("seed_title", "—")[:40]
+        seeds = data.get("seed_titles", ["—"])
+        seed_display = f"{len(seeds)} papers" if len(seeds) > 1 else seeds[0][:40]
         st.markdown(
             f'<div class="stat-card"><div class="stat-num" style="font-size:1rem;color:#10b981;">'
-            f'{seed}</div><div class="stat-label">Seed Paper</div></div>',
+            f'{seed_display}</div><div class="stat-label">Seed Paper(s)</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -289,6 +291,71 @@ if "📝 Manual" in mode:
                     "title": title_input.strip(),
                     "abstract": abstract_input.strip(),
                     "citations": citations,
+                    "references": [],
+                }
+
+                t0 = time.time()
+                try:
+                    resp = requests.post(
+                        f"{INFERENCE_API}/api/analyze-gap",
+                        json=payload,
+                        timeout=300,
+                    )
+                    elapsed = round(time.time() - t0, 1)
+
+                    if resp.status_code == 200:
+                        st.success(f"✅ Analysis complete in {elapsed}s")
+                        _render_results(resp.json())
+                    else:
+                        detail = resp.json().get("detail", resp.text)
+                        st.error(f"API error {resp.status_code}: {detail}")
+                except requests.exceptions.ConnectionError:
+                    st.error("Inference API is unreachable. Make sure `app/main.py` is running on port 8001.")
+                except Exception as exc:
+                    st.error(f"Unexpected error: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Input form — Batch mode (Multiple Papers)
+# ---------------------------------------------------------------------------
+elif "📚 Batch" in mode:
+    st.markdown("## 📚 Batch Input (Series of Papers)")
+    st.info("Paste multiple papers below to collectively identify research gaps between them.")
+
+    # Initialize a default dataframe with 3 empty rows
+    if "batch_df" not in st.session_state:
+        st.session_state["batch_df"] = pd.DataFrame(
+            [{"title": "", "abstract": ""} for _ in range(3)]
+        )
+
+    edited_df = st.data_editor(
+        st.session_state["batch_df"],
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "title": st.column_config.TextColumn("Paper Title", width="large", required=True),
+            "abstract": st.column_config.TextColumn("Abstract", width="large", required=True),
+        },
+    )
+
+    analyze_btn = st.button("🚀 Analyze Chain of Papers", type="primary", use_container_width=True)
+
+    if analyze_btn:
+        # Filter out empty rows
+        valid_papers = []
+        for _, row in edited_df.iterrows():
+            t = str(row.get("title", "")).strip()
+            a = str(row.get("abstract", "")).strip()
+            if t and a:
+                valid_papers.append({"title": t, "abstract": a})
+        
+        if not valid_papers:
+            st.error("Please provide at least one paper with a title and abstract.")
+        else:
+            with st.spinner(f"🤖 Analyzing {len(valid_papers)} papers collectively…"):
+                payload = {
+                    "seed_papers": valid_papers,
+                    "citations": [],
                     "references": [],
                 }
 
