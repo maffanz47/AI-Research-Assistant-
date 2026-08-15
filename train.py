@@ -263,12 +263,14 @@ def main() -> None:
         # ── Train ─────────────────────────────────────────────────────────
         logger.info("Starting training …")
         train_result = trainer.train()
-        logger.info("Training complete. Metrics: %s", train_result.metrics)
         mlflow.log_metrics(
             {k: v for k, v in train_result.metrics.items() if isinstance(v, (int, float))}
         )
 
-        # ── Save adapter ──────────────────────────────────────────────────
+        # Write metrics to a local file for DVC to track
+        with open("metrics.json", "w", encoding="utf-8") as f:
+            json.dump(train_result.metrics, f, indent=4)
+        logger.info("Saved local metrics.json for DVC.")
         output_path = Path(args.output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(str(output_path))
