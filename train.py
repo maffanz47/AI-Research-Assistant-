@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num_train_epochs", type=int, default=3, help="Number of training epochs")
     p.add_argument("--learning_rate", type=float, default=2e-4, help="Learning rate")
     p.add_argument("--warmup_steps", type=int, default=5, help="Warmup steps")
-    p.add_argument("--mlflow_uri", default=os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
+    p.add_argument("--mlflow_uri", default=os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"))
     p.add_argument("--mlflow_experiment", default="research-gap-finder-finetune")
     return p.parse_args()
 
