@@ -3,37 +3,51 @@ run.py
 ======
 Single-command runner for the Research Gap Finder FastAPI backend.
 
-Starts Uvicorn on 0.0.0.0:8000 (accessible over the network).
-No tunnel, no SSH — just run and forget.
+Starts Uvicorn on port 8000, then opens an SSH reverse tunnel via
+localhost.run which provides a stable public HTTPS URL — no account,
+no installation, no firewall rules required.
 
 Usage
 -----
-  python run.py                       # Mock LLM mode
+  python run.py                       # Mock LLM (default, for testing)
   USE_MOCK_LLM=false python run.py    # Real Qwen model via Ollama
-  UVICORN_WORKERS=2 python run.py     # Multiple workers (not recommended for GPU)
+  UVICORN_WORKERS=2 python run.py     # Multiple workers
 """
 
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-
-HOST = os.getenv("UVICORN_HOST", "0.0.0.0")   # Bind to all interfaces
-PORT = int(os.getenv("UVICORN_PORT", "8000"))
-APP_MODULE = "api:app"
+HOST    = os.getenv("UVICORN_HOST", "0.0.0.0")
+PORT    = int(os.getenv("UVICORN_PORT", "8000"))
+MODULE  = "api:app"
 WORKERS = int(os.getenv("UVICORN_WORKERS", "1"))
 
-# ---------------------------------------------------------------------------
-# ANSI Terminal Helpers
-# ---------------------------------------------------------------------------
+# SSH tunnel command — localhost.run; no account needed
+TUNNEL_CMD = [
+    "ssh",
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "ServerAliveInterval=30",
+    "-o", "ServerAliveCountMax=5",
+    "-o", "ExitOnForwardFailure=yes",
+    "-R", f"80:localhost:{PORT}",
+    "nokey@localhost.run",
+    "--",
+    "--output=json",
+]
 
+# ---------------------------------------------------------------------------
+# ANSI helpers (ASCII-only, safe on all terminals)
+# ---------------------------------------------------------------------------
 _RESET  = "\033[0m"
 _BOLD   = "\033[1m"
 _GREEN  = "\033[32m"
@@ -41,97 +55,156 @@ _YELLOW = "\033[33m"
 _CYAN   = "\033[36m"
 _RED    = "\033[31m"
 
-
 def _c(color: str, text: str) -> str:
-    if sys.stdout.isatty():
-        return f"{color}{text}{_RESET}"
-    return text
+    return f"{color}{text}{_RESET}" if sys.stdout.isatty() else text
 
-
-def _print_banner() -> None:
-    print()
-    print(_c(_BOLD + _CYAN, "======================================================"))
-    print(_c(_BOLD + _CYAN, "       Research Gap Finder — Backend Server"))
-    print(_c(_BOLD + _CYAN, "======================================================"))
-    print()
+def _banner() -> None:
     use_mock = os.getenv("USE_MOCK_LLM", "true").strip().lower() not in ("false", "0", "no")
     model    = os.getenv("OLLAMA_MODEL", "qwen2.5:14b-instruct-q4_K_M")
-    print(f"  {'LLM mode':<18}: {_c(_YELLOW, 'MOCK') if use_mock else _c(_GREEN, f'REAL  ({model})')}")
-    print(f"  {'Uvicorn target':<18}: {APP_MODULE}  (workers={WORKERS})")
-    print(f"  {'Listening on':<18}: http://{HOST}:{PORT}")
     print()
-    print(_c(_GREEN, "  The server is accessible on the local network."))
-    print(_c(_GREEN, f"  Set NEXT_PUBLIC_API_URL=http://<this-machine-ip>:{PORT}"))
-    print(_c(_GREEN, "  in your frontend .env.local to connect."))
+    print(_c(_BOLD + _CYAN, "=" * 56))
+    print(_c(_BOLD + _CYAN, "     Research Gap Finder - Backend Runner"))
+    print(_c(_BOLD + _CYAN, "=" * 56))
+    print(f"  LLM mode : {_c(_YELLOW, 'MOCK') if use_mock else _c(_GREEN, 'REAL (' + model + ')')}")
+    print(f"  Local    : http://localhost:{PORT}")
+    print(_c(_CYAN, "  Starting SSH tunnel to localhost.run..."))
     print()
-
 
 # ---------------------------------------------------------------------------
-# Process Management
+# Process references (module-level so signal handler can reach them)
 # ---------------------------------------------------------------------------
+_uvicorn_proc: subprocess.Popen | None = None
+_tunnel_proc:  subprocess.Popen | None = None
 
-_proc: subprocess.Popen | None = None
+
+def _kill_all() -> None:
+    for p in (_tunnel_proc, _uvicorn_proc):
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+                p.wait(timeout=4)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
 
 
 def _signal_handler(signum: int, _frame: object) -> None:
     print()
-    print(_c(_YELLOW, "Shutting down (received signal %d)..." % signum))
-    if _proc and _proc.poll() is None:
-        try:
-            if sys.platform == "win32":
-                _proc.terminate()
-            else:
-                _proc.send_signal(signal.SIGTERM)
-        except Exception:
-            pass
-        try:
-            _proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _proc.kill()
-    print(_c(_GREEN, "Server stopped. Goodbye!"))
+    print(_c(_YELLOW, "Shutting down... (Ctrl+C received)"))
+    _kill_all()
+    print(_c(_GREEN, "All processes stopped. Goodbye!"))
     sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# Tunnel URL reader (runs in a background thread)
+# ---------------------------------------------------------------------------
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_URL_RE  = re.compile(r"https://[a-zA-Z0-9\-]+\.lhr\.life")
+
+def _read_tunnel_output(proc: subprocess.Popen) -> None:
+    """Read tunnel output line-by-line and print the HTTPS URL when found."""
+    assert proc.stdout is not None
+    url_printed = False
+    for raw in proc.stdout:
+        line = _ANSI_RE.sub("", raw.rstrip())
+        if not url_printed:
+            m = _URL_RE.search(line)
+            if m:
+                url = m.group(0)
+                url_printed = True
+                print()
+                print(_c(_BOLD + _GREEN, "=" * 56))
+                print(_c(_BOLD + _GREEN, "  PUBLIC HTTPS URL READY"))
+                print(_c(_BOLD + _GREEN, "=" * 56))
+                print()
+                print(_c(_BOLD + _GREEN, f"  >>> {url}"))
+                print()
+                print(_c(_GREEN,  "  Paste this URL into your Vercel frontend."))
+                print(_c(_YELLOW, "  It changes each time the server restarts."))
+                print()
+                print(_c(_CYAN,  "  Press Ctrl+C to stop the server."))
+                print()
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-
 def main() -> None:
-    global _proc
+    global _uvicorn_proc, _tunnel_proc
 
-    signal.signal(signal.SIGINT,  _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, _signal_handler)
 
-    _print_banner()
+    _banner()
 
-    cmd = [
-        sys.executable, "-m", "uvicorn",
-        APP_MODULE,
+    # 1. Start Uvicorn
+    uv_cmd = [
+        sys.executable, "-m", "uvicorn", MODULE,
         "--host", HOST,
         "--port", str(PORT),
         "--workers", str(WORKERS),
     ]
-    print(_c(_CYAN, f"Starting: {' '.join(cmd)}"))
-    print()
+    _uvicorn_proc = subprocess.Popen(
+        uv_cmd,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        stdin=subprocess.DEVNULL,
+    )
 
-    _proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
-
-    # Wait briefly to check for immediate crashes
+    # Wait and check it didn't immediately crash
     time.sleep(2)
-    if _proc.poll() is not None:
-        print(_c(_RED, f"Uvicorn exited early (code {_proc.returncode})."))
+    if _uvicorn_proc.poll() is not None:
+        print(_c(_RED, f"Uvicorn exited immediately (code {_uvicorn_proc.returncode})."))
         sys.exit(1)
 
-    print(_c(_GREEN, f"Server running at http://{HOST}:{PORT}"))
-    print(_c(_GREEN, "Press Ctrl+C to stop."))
-    print()
+    print(_c(_GREEN, f"Uvicorn running at http://localhost:{PORT}"))
+    print(_c(_CYAN, "Opening SSH tunnel to localhost.run ..."))
 
-    # Block until process exits
-    try:
-        _proc.wait()
-    except KeyboardInterrupt:
-        pass
+    # 2. Start SSH tunnel
+    _tunnel_proc = subprocess.Popen(
+        TUNNEL_CMD,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+    )
+
+    # 3. Parse tunnel URL in background thread
+    t = threading.Thread(target=_read_tunnel_output, args=(_tunnel_proc,), daemon=True)
+    t.start()
+
+    # 4. Block — restart tunnel if it dies while uvicorn is still alive
+    while True:
+        try:
+            time.sleep(5)
+        except KeyboardInterrupt:
+            break
+
+        # If uvicorn died, exit everything
+        if _uvicorn_proc.poll() is not None:
+            print(_c(_RED, "Uvicorn stopped unexpectedly. Exiting."))
+            _kill_all()
+            sys.exit(1)
+
+        # If tunnel died, restart it
+        if _tunnel_proc.poll() is not None:
+            print(_c(_YELLOW, "Tunnel closed. Restarting in 3s..."))
+            time.sleep(3)
+            _tunnel_proc = subprocess.Popen(
+                TUNNEL_CMD,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+            t2 = threading.Thread(target=_read_tunnel_output, args=(_tunnel_proc,), daemon=True)
+            t2.start()
 
 
 if __name__ == "__main__":

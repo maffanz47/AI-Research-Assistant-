@@ -38,7 +38,8 @@ type Mode = "manual" | "batch" | "auto";
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const STORAGE_KEY = "rgf_backend_url";
+const ENV_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 const EXAMPLE_ABSTRACT = `We introduce Transformer, a novel neural network architecture based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train.`;
 
@@ -168,6 +169,28 @@ export default function ResearchGapFinder() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthErr, setHealthErr] = useState(false);
 
+  // Backend URL state (localStorage-backed)
+  const [backendUrl, setBackendUrl] = useState<string>(ENV_URL);
+  const [urlInput, setUrlInput]     = useState<string>(ENV_URL);
+  const [urlSaved, setUrlSaved]     = useState(false);
+
+  // Load saved URL from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) { setBackendUrl(saved); setUrlInput(saved); }
+      else if (ENV_URL) { setBackendUrl(ENV_URL); setUrlInput(ENV_URL); }
+    } catch { /* private mode */ }
+  }, []);
+
+  const saveUrl = useCallback(() => {
+    const trimmed = urlInput.trim().replace(/\/$/, "");
+    try { localStorage.setItem(STORAGE_KEY, trimmed); } catch { /* noop */ }
+    setBackendUrl(trimmed);
+    setUrlSaved(true);
+    setTimeout(() => setUrlSaved(false), 2000);
+  }, [urlInput]);
+
   // Manual mode state
   const [title, setTitle] = useState("");
   const [abstract, setAbstract] = useState("");
@@ -192,13 +215,15 @@ export default function ResearchGapFinder() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 5000);
   }, []);
 
-  // Health check on mount
+  // Health check — re-run whenever backendUrl changes
   useEffect(() => {
-    fetch(`${API_URL}/inference/health`, { signal: AbortSignal.timeout(5000) })
+    if (!backendUrl) { setHealth(null); setHealthErr(false); return; }
+    setHealth(null); setHealthErr(false);
+    fetch(`${backendUrl}/inference/health`, { signal: AbortSignal.timeout(5000) })
       .then((r) => r.json())
       .then((d) => { setHealth(d); setHealthErr(false); })
       .catch(() => setHealthErr(true));
-  }, []);
+  }, [backendUrl]);
 
   // Copy gaps to clipboard
   const copyGaps = useCallback(() => {
@@ -210,13 +235,14 @@ export default function ResearchGapFinder() {
 
   // ── Manual mode submit ──
   const submitManual = useCallback(async () => {
+    if (!backendUrl) { toast("Save a Backend URL first."); return; }
     if (!title.trim() || !abstract.trim()) { toast("Please provide both a title and an abstract."); return; }
     setIsLoading(true); setResult(null);
     const citationList = citations.trim().split("\n").filter(Boolean).map((id) => ({
       paper_id: id.trim(), title: id.trim(), abstract: "", citation_count: 0, is_influential: false, intents: [],
     }));
     try {
-      const res = await fetch(`${API_URL}/inference/api/analyze-gap`, {
+      const res = await fetch(`${backendUrl}/inference/api/analyze-gap`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: title.trim(), abstract: abstract.trim(), citations: citationList, references: [] }),
@@ -230,11 +256,12 @@ export default function ResearchGapFinder() {
 
   // ── Batch mode submit ──
   const submitBatch = useCallback(async () => {
+    if (!backendUrl) { toast("Save a Backend URL first."); return; }
     const valid = batchPapers.filter((p) => p.title.trim() && p.abstract.trim());
     if (!valid.length) { toast("Add at least one paper with title and abstract."); return; }
     setIsLoading(true); setResult(null);
     try {
-      const res = await fetch(`${API_URL}/inference/api/analyze-gap`, {
+      const res = await fetch(`${backendUrl}/inference/api/analyze-gap`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ seed_papers: valid, citations: [], references: [] }),
@@ -248,11 +275,12 @@ export default function ResearchGapFinder() {
 
   // ── Auto mode submit ──
   const submitAuto = useCallback(async () => {
+    if (!backendUrl) { toast("Save a Backend URL first."); return; }
     if (!paperId.trim()) { toast("Enter a paper ID."); return; }
     setIsLoading(true); setResult(null);
     try {
       // Step 1: Fetch from pipeline API
-      const pipeRes = await fetch(`${API_URL}/analyze`, {
+      const pipeRes = await fetch(`${backendUrl}/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ paper_id: paperId.trim() }),
@@ -269,7 +297,7 @@ export default function ResearchGapFinder() {
       }
 
       // Step 3: Run inference
-      const infRes = await fetch(`${API_URL}/inference/api/analyze-gap`, {
+      const infRes = await fetch(`${backendUrl}/inference/api/analyze-gap`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: seedTitle, abstract: seedAbstract, citations: [], references: [] }),
@@ -309,7 +337,9 @@ export default function ResearchGapFinder() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {healthErr ? (
+            {!backendUrl ? (
+              <StatusChip label="No URL set" type="neutral" />
+            ) : healthErr ? (
               <StatusChip label="API Offline" type="error" />
             ) : health ? (
               <>
@@ -319,6 +349,27 @@ export default function ResearchGapFinder() {
             ) : (
               <StatusChip label="Checking…" type="neutral" />
             )}
+          </div>
+        </div>
+        {/* URL Config Bar */}
+        <div className="border-t border-[var(--color-outline-variant)] bg-[var(--color-surface-dim)]">
+          <div className="max-w-4xl mx-auto px-4 py-2 flex items-center gap-2">
+            <label htmlFor="backend-url" className="text-xs text-[var(--color-on-surface-variant)] whitespace-nowrap font-medium">Backend URL:</label>
+            <input
+              id="backend-url"
+              type="url"
+              value={urlInput}
+              onChange={(e) => setUrlInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && saveUrl()}
+              placeholder="https://xxxx.lhr.life  (paste tunnel URL from GPU terminal)"
+              className="input-field flex-1 py-1.5 text-xs"
+            />
+            <button
+              onClick={saveUrl}
+              className="btn-primary px-4 py-1.5 text-xs whitespace-nowrap"
+            >
+              {urlSaved ? "Saved!" : "Save & Connect"}
+            </button>
           </div>
         </div>
       </header>
