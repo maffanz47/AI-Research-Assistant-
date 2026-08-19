@@ -3,13 +3,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 // ---------------------------------------------------------------------------
-// Types
+// Types matching backend schemas
 // ---------------------------------------------------------------------------
+interface ResearchGap {
+  gap_id: number;
+  title: string;
+  description: string;
+  evidence: string;
+  recommended_action: string;
+}
 
-interface InferResponse {
-  gaps: string[];
+interface AnalyzeGapResponse {
+  seed_titles: string[];
+  executive_summary: string;
+  gaps: ResearchGap[];
   model_used: string;
-  gpu: boolean;
+}
+
+interface HealthResponse {
+  status: string;
+  model_loaded?: boolean;
+  mock_mode?: boolean;
+  gpu?: boolean;
 }
 
 interface Toast {
@@ -18,137 +33,129 @@ interface Toast {
   type: "error" | "success" | "info";
 }
 
+type Mode = "manual" | "batch" | "auto";
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-const STORAGE_KEY = "rgf_backend_url";
-const DEFAULT_URL = "";
-
-const EXAMPLE_ABSTRACT = `We introduce Transformer, a novel neural network architecture based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train. Our model achieves 28.4 BLEU on the WMT 2014 English-to-German translation task, improving over the existing best results by over 2 BLEU. On the WMT 2014 English-to-French translation task, our model establishes a new single-model state-of-the-art BLEU score of 41.8 after training for 3.5 days on eight GPUs.`;
+const EXAMPLE_ABSTRACT = `We introduce Transformer, a novel neural network architecture based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train.`;
 
 // ---------------------------------------------------------------------------
-// Sub-components
+// Utility sub-components
 // ---------------------------------------------------------------------------
-
-function Spinner() {
+function Spinner({ size = 16 }: { size?: number }) {
   return (
     <span
-      className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full"
-      style={{ animation: "spin 0.8s linear infinite" }}
-      aria-label="Loading"
+      className="inline-block border-2 border-current/30 border-t-current rounded-full"
+      style={{ width: size, height: size, animation: "spin 0.7s linear infinite" }}
     />
   );
 }
 
-function GapCardSkeleton({ index }: { index: number }) {
-  return (
-    <div
-      className="glass rounded-2xl p-5"
-      style={{ animationDelay: `${index * 0.08}s` }}
-    >
-      <div className="flex items-start gap-4">
-        <div className="skeleton w-9 h-9 rounded-full flex-shrink-0" />
-        <div className="flex-1 space-y-2.5 pt-1">
-          <div className="skeleton h-3.5 w-full rounded" />
-          <div className="skeleton h-3.5 w-4/5 rounded" />
-          <div className="skeleton h-3.5 w-3/5 rounded" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function GapCard({ gap, index }: { gap: string; index: number }) {
-  // Strip any leading "1. " / "Gap 1:" prefix the LLM might have added
-  const clean = gap.replace(/^(\d+[\.\)]\s*|Gap\s*\d+[:\-\s]*)/i, "").trim();
-
-  return (
-    <div
-      className="glass rounded-2xl p-5 hover:border-indigo-500/30 transition-all duration-300 animate-fade-up"
-      style={{ animationDelay: `${index * 0.1}s` }}
-    >
-      <div className="flex items-start gap-4">
-        {/* Number badge */}
-        <div className="gap-badge flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold text-white">
-          {index + 1}
-        </div>
-        <p className="text-slate-200 leading-relaxed text-sm md:text-base flex-1">
-          {clean}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function ToastItem({
-  toast,
-  onDismiss,
-}: {
-  toast: Toast;
-  onDismiss: (id: number) => void;
-}) {
-  const colors = {
-    error: "bg-red-950/90 border-red-500/40 text-red-200",
-    success: "bg-emerald-950/90 border-emerald-500/40 text-emerald-200",
-    info: "bg-indigo-950/90 border-indigo-500/40 text-indigo-200",
+function ToastContainer({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {
+  if (!toasts.length) return null;
+  const styles = {
+    error: "bg-[var(--color-error-container)] text-[var(--color-error)] border-[var(--color-error)]",
+    success: "bg-[var(--color-success-container)] text-[var(--color-success)] border-[var(--color-success)]",
+    info: "bg-[var(--color-primary-container)] text-[var(--color-primary)] border-[var(--color-primary)]",
   };
-  const icons = { error: "✕", success: "✓", info: "ℹ" };
-
   return (
-    <div
-      className={`animate-slide-in glass rounded-xl px-4 py-3 flex items-center gap-3 border text-sm max-w-sm ${colors[toast.type]}`}
-    >
-      <span className="font-bold text-base">{icons[toast.type]}</span>
-      <span className="flex-1">{toast.message}</span>
-      <button
-        onClick={() => onDismiss(toast.id)}
-        className="opacity-60 hover:opacity-100 transition-opacity ml-1 text-lg leading-none"
-        aria-label="Dismiss notification"
-      >
-        ×
-      </button>
+    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 max-w-sm">
+      {toasts.map((t) => (
+        <div key={t.id} className={`animate-slide-in rounded-lg px-4 py-3 border text-sm flex items-center gap-2 shadow-md ${styles[t.type]}`}>
+          <span className="flex-1">{t.message}</span>
+          <button onClick={() => onDismiss(t.id)} className="opacity-60 hover:opacity-100 text-lg leading-none">×</button>
+        </div>
+      ))}
     </div>
   );
 }
 
-function StatusBadge({ url }: { url: string }) {
-  const [status, setStatus] = useState<"idle" | "checking" | "online" | "offline">("idle");
-  const [gpu, setGpu] = useState<boolean | null>(null);
-
-  const check = useCallback(async () => {
-    if (!url) { setStatus("idle"); return; }
-    setStatus("checking");
-    try {
-      const res = await fetch(url.replace(/\/$/, "") + "/", { signal: AbortSignal.timeout(5000) });
-      const data = await res.json();
-      setStatus("online");
-      setGpu(data.gpu ?? null);
-    } catch {
-      setStatus("offline");
-      setGpu(null);
-    }
-  }, [url]);
-
-  useEffect(() => { check(); }, [check]);
-
-  if (status === "idle") return null;
-
-  const map = {
-    checking: { dot: "bg-yellow-400 animate-pulse", label: "Checking…" },
-    online:   { dot: "bg-emerald-400", label: `Online${gpu !== null ? ` · ${gpu ? "🚀 GPU" : "💻 CPU"}` : ""}` },
-    offline:  { dot: "bg-red-400", label: "Unreachable" },
-  } as const;
-
-  const cfg = map[status as keyof typeof map];
-
+function StatusChip({ label, type }: { label: string; type: "success" | "error" | "warning" | "neutral" }) {
+  const cls = { success: "chip-success", error: "chip-error", warning: "chip-warning", neutral: "chip-neutral" };
+  const dots = { success: "bg-[var(--color-success)]", error: "bg-[var(--color-error)]", warning: "bg-amber-500", neutral: "bg-gray-400" };
   return (
-    <div className="flex items-center gap-2 text-xs text-slate-400">
-      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${cfg.dot}`} />
-      <span>{cfg.label}</span>
-      <button onClick={check} className="text-indigo-400 hover:text-indigo-300 transition-colors underline-offset-2 hover:underline" title="Re-check">
-        Recheck
-      </button>
+    <span className={`chip ${cls[type]}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${dots[type]}`} />
+      {label}
+    </span>
+  );
+}
+
+function GapCard({ gap, index }: { gap: ResearchGap; index: number }) {
+  const colors = ["border-l-blue-600", "border-l-pink-500", "border-l-green-600", "border-l-amber-500", "border-l-purple-600"];
+  return (
+    <div className={`card p-5 border-l-4 ${colors[index % colors.length]} animate-fade-up`} style={{ animationDelay: `${index * 0.08}s` }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span className="chip-neutral chip text-xs">Gap #{gap.gap_id}</span>
+        <h3 className="font-semibold text-[var(--color-on-surface)]">{gap.title}</h3>
+      </div>
+      <div className="space-y-3 text-sm">
+        <div>
+          <p className="text-xs font-medium text-[var(--color-on-surface-variant)] uppercase tracking-wider mb-1">Description</p>
+          <p className="text-[var(--color-on-surface)]">{gap.description}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium text-[var(--color-on-surface-variant)] uppercase tracking-wider mb-1">Evidence</p>
+          <p className="text-[var(--color-on-surface)]">{gap.evidence}</p>
+        </div>
+        <div className="bg-[var(--color-surface-dim)] border border-[var(--color-outline-variant)] rounded-lg p-3">
+          <p className="text-xs font-medium text-[var(--color-primary)] uppercase tracking-wider mb-1">💡 Recommended Action</p>
+          <p className="text-[var(--color-on-surface)]">{gap.recommended_action}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ResultsView({ data, onCopy }: { data: AnalyzeGapResponse; onCopy: () => void }) {
+  const [showJson, setShowJson] = useState(false);
+  return (
+    <div className="space-y-5 animate-fade-up">
+      {/* Stats row */}
+      <div className="grid grid-cols-3 gap-4">
+        {[
+          { label: "Gaps Found", value: String(data.gaps.length), color: "text-[var(--color-primary)]" },
+          { label: "Model", value: data.model_used, color: "text-[var(--color-on-surface)]" },
+          { label: "Seed Papers", value: data.seed_titles.length > 1 ? `${data.seed_titles.length} papers` : (data.seed_titles[0]?.substring(0, 35) || "—"), color: "text-[var(--color-success)]" },
+        ].map((s, i) => (
+          <div key={i} className="card p-4 text-center">
+            <p className={`text-lg font-bold ${s.color} truncate`}>{s.value}</p>
+            <p className="text-xs text-[var(--color-on-surface-variant)] mt-1">{s.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Executive summary */}
+      <div className="bg-[var(--color-primary-container)] border border-blue-200 rounded-lg p-4">
+        <p className="text-xs font-semibold text-[var(--color-primary)] uppercase tracking-wider mb-1">Executive Summary</p>
+        <p className="text-sm text-[var(--color-on-surface)]">{data.executive_summary}</p>
+      </div>
+
+      {/* Gap cards */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-lg font-semibold text-[var(--color-on-surface)]">Identified Research Gaps</h2>
+          <button onClick={onCopy} className="btn-outlined px-3 py-1.5 text-xs">Copy All</button>
+        </div>
+        <div className="space-y-4">
+          {data.gaps.map((gap, i) => <GapCard key={gap.gap_id} gap={gap} index={i} />)}
+        </div>
+      </div>
+
+      {/* Raw JSON toggle */}
+      <div className="border-t border-[var(--color-outline-variant)] pt-3">
+        <button onClick={() => setShowJson(!showJson)} className="btn-outlined px-3 py-1.5 text-xs">
+          {showJson ? "Hide" : "Show"} Raw JSON
+        </button>
+        {showJson && (
+          <pre className="mt-3 bg-[var(--color-surface-dim)] border border-[var(--color-outline)] rounded-lg p-4 text-xs overflow-auto max-h-80">
+            {JSON.stringify(data, null, 2)}
+          </pre>
+        )}
+      </div>
     </div>
   );
 }
@@ -156,339 +163,284 @@ function StatusBadge({ url }: { url: string }) {
 // ---------------------------------------------------------------------------
 // Main Component
 // ---------------------------------------------------------------------------
-
 export default function ResearchGapFinder() {
-  // Saved backend URL (persisted in localStorage)
-  const [backendUrl, setBackendUrl] = useState<string>(DEFAULT_URL);
-  const [urlInput, setUrlInput] = useState<string>(DEFAULT_URL);
-  const [urlSaved, setUrlSaved] = useState(false);
+  const [mode, setMode] = useState<Mode>("manual");
+  const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [healthErr, setHealthErr] = useState(false);
 
-  // Abstract input
+  // Manual mode state
+  const [title, setTitle] = useState("");
   const [abstract, setAbstract] = useState("");
+  const [citations, setCitations] = useState("");
 
-  // Analysis state
+  // Batch mode state
+  const [batchPapers, setBatchPapers] = useState([{ title: "", abstract: "" }, { title: "", abstract: "" }, { title: "", abstract: "" }]);
+
+  // Auto mode state
+  const [paperId, setPaperId] = useState("1706.03762");
+
+  // Shared state
   const [isLoading, setIsLoading] = useState(false);
-  const [result, setResult] = useState<InferResponse | null>(null);
-  const [topK, setTopK] = useState(3);
-
-  // Toasts
+  const [result, setResult] = useState<AnalyzeGapResponse | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const toastCounter = useRef(0);
+  const toastId = useRef(0);
 
-  // ---------------------------------------------------------------------------
-  // Load persisted URL from localStorage on mount
-  // ---------------------------------------------------------------------------
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY) ?? "";
-      setBackendUrl(saved);
-      setUrlInput(saved);
-    } catch {
-      // localStorage not available (e.g. private mode)
-    }
-  }, []);
-
-  // ---------------------------------------------------------------------------
-  // Toast helpers
-  // ---------------------------------------------------------------------------
-  const addToast = useCallback((message: string, type: Toast["type"] = "error") => {
-    const id = ++toastCounter.current;
+  // Toast helper
+  const toast = useCallback((message: string, type: Toast["type"] = "error") => {
+    const id = ++toastId.current;
     setToasts((t) => [...t, { id, message, type }]);
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 5000);
   }, []);
 
-  const dismissToast = useCallback((id: number) => {
-    setToasts((t) => t.filter((x) => x.id !== id));
+  // Health check on mount
+  useEffect(() => {
+    fetch(`${API_URL}/health`, { signal: AbortSignal.timeout(5000) })
+      .then((r) => r.json())
+      .then((d) => { setHealth(d); setHealthErr(false); })
+      .catch(() => setHealthErr(true));
   }, []);
 
-  // ---------------------------------------------------------------------------
-  // Save backend URL
-  // ---------------------------------------------------------------------------
-  const saveUrl = useCallback(() => {
-    const trimmed = urlInput.trim().replace(/\/$/, "");
-    try { localStorage.setItem(STORAGE_KEY, trimmed); } catch { /* noop */ }
-    setBackendUrl(trimmed);
-    setUrlSaved(true);
-    setTimeout(() => setUrlSaved(false), 2000);
-    addToast("Backend URL saved!", "success");
-  }, [urlInput, addToast]);
+  // Copy gaps to clipboard
+  const copyGaps = useCallback(() => {
+    if (!result) return;
+    const text = result.gaps.map((g) => `${g.gap_id}. ${g.title}\n   ${g.description}\n   Evidence: ${g.evidence}\n   Action: ${g.recommended_action}`).join("\n\n");
+    navigator.clipboard.writeText(text);
+    toast("Copied to clipboard!", "success");
+  }, [result, toast]);
 
-  // ---------------------------------------------------------------------------
-  // Analyze (client-side fetch to GPU backend)
-  // ---------------------------------------------------------------------------
-  const analyze = useCallback(async () => {
-    if (!backendUrl) {
-      addToast("Please save a Backend API URL first.", "error");
-      return;
-    }
-    if (abstract.trim().length < 50) {
-      addToast("Abstract must be at least 50 characters long.", "error");
-      return;
-    }
-
-    setIsLoading(true);
-    setResult(null);
-
+  // ── Manual mode submit ──
+  const submitManual = useCallback(async () => {
+    if (!title.trim() || !abstract.trim()) { toast("Please provide both a title and an abstract."); return; }
+    setIsLoading(true); setResult(null);
+    const citationList = citations.trim().split("\n").filter(Boolean).map((id) => ({
+      paper_id: id.trim(), title: id.trim(), abstract: "", citation_count: 0, is_influential: false, intents: [],
+    }));
     try {
-      // NOTE: Backend exposes /infer (not /predict)
-      const endpoint = backendUrl.replace(/\/$/, "") + "/infer";
-      const res = await fetch(endpoint, {
+      const res = await fetch(`${API_URL}/api/analyze-gap`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ abstract: abstract.trim(), top_k_gaps: topK }),
+        body: JSON.stringify({ title: title.trim(), abstract: abstract.trim(), citations: citationList, references: [] }),
       });
+      if (!res.ok) throw new Error(`Server error ${res.status}: ${await res.text()}`);
+      setResult(await res.json());
+      toast("Analysis complete!", "success");
+    } catch (e) { toast((e as Error).message); }
+    finally { setIsLoading(false); }
+  }, [title, abstract, citations, toast]);
 
-      if (!res.ok) {
-        const errBody = await res.text();
-        throw new Error(`Server returned ${res.status}: ${errBody}`);
+  // ── Batch mode submit ──
+  const submitBatch = useCallback(async () => {
+    const valid = batchPapers.filter((p) => p.title.trim() && p.abstract.trim());
+    if (!valid.length) { toast("Add at least one paper with title and abstract."); return; }
+    setIsLoading(true); setResult(null);
+    try {
+      const res = await fetch(`${API_URL}/api/analyze-gap`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seed_papers: valid, citations: [], references: [] }),
+      });
+      if (!res.ok) throw new Error(`Server error ${res.status}: ${await res.text()}`);
+      setResult(await res.json());
+      toast(`Analyzed ${valid.length} papers!`, "success");
+    } catch (e) { toast((e as Error).message); }
+    finally { setIsLoading(false); }
+  }, [batchPapers, toast]);
+
+  // ── Auto mode submit ──
+  const submitAuto = useCallback(async () => {
+    if (!paperId.trim()) { toast("Enter a paper ID."); return; }
+    setIsLoading(true); setResult(null);
+    try {
+      // Step 1: Fetch from pipeline API
+      const pipeRes = await fetch(`${API_URL}/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paper_id: paperId.trim() }),
+      });
+      if (!pipeRes.ok) throw new Error(`Pipeline error ${pipeRes.status}`);
+
+      // Step 2: Fetch seed metadata via Semantic Scholar
+      const s2Res = await fetch(`https://api.semanticscholar.org/graph/v1/paper/${paperId.trim()}?fields=title,abstract`, { signal: AbortSignal.timeout(10000) });
+      let seedTitle = paperId.trim(), seedAbstract = "Abstract not available.";
+      if (s2Res.ok) {
+        const s2 = await s2Res.json();
+        seedTitle = s2.title || seedTitle;
+        seedAbstract = s2.abstract || seedAbstract;
       }
 
-      const data: InferResponse = await res.json();
-      setResult(data);
-    } catch (err) {
-      const message =
-        err instanceof TypeError
-          ? "Could not reach the backend. Is your tunnel URL correct and the server running?"
-          : (err as Error).message;
-      addToast(message, "error");
-    } finally {
-      setIsLoading(false);
-    }
-  }, [backendUrl, abstract, topK, addToast]);
+      // Step 3: Run inference
+      const infRes = await fetch(`${API_URL}/api/analyze-gap`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: seedTitle, abstract: seedAbstract, citations: [], references: [] }),
+      });
+      if (!infRes.ok) throw new Error(`Inference error ${infRes.status}`);
+      setResult(await infRes.json());
+      toast("Auto-analysis complete!", "success");
+    } catch (e) { toast((e as Error).message); }
+    finally { setIsLoading(false); }
+  }, [paperId, toast]);
 
-  // Keyboard shortcut: Ctrl+Enter / Cmd+Enter to analyze
-  const handleTextareaKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-        e.preventDefault();
-        if (!isLoading) analyze();
-      }
-    },
-    [isLoading, analyze]
-  );
+  // Batch row helpers
+  const updateBatch = (i: number, field: "title" | "abstract", value: string) => {
+    setBatchPapers((p) => p.map((r, j) => (j === i ? { ...r, [field]: value } : r)));
+  };
+  const addBatchRow = () => setBatchPapers((p) => [...p, { title: "", abstract: "" }]);
+  const removeBatchRow = (i: number) => setBatchPapers((p) => p.filter((_, j) => j !== i));
 
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
+  const modes: { key: Mode; label: string; icon: string }[] = [
+    { key: "manual", label: "Manual (Single)", icon: "📝" },
+    { key: "batch", label: "Batch (Multiple)", icon: "📚" },
+    { key: "auto", label: "Auto (arXiv / DOI)", icon: "🔗" },
+  ];
+
   return (
     <>
-      {/* Toast Container */}
-      <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center pointer-events-none">
-        {toasts.map((t) => (
-          <div key={t.id} className="pointer-events-auto">
-            <ToastItem toast={t} onDismiss={dismissToast} />
-          </div>
-        ))}
-      </div>
+      <ToastContainer toasts={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
 
-      <div className="max-w-3xl mx-auto space-y-6">
-        {/* ── Header ─────────────────────────────────────────────────────── */}
-        <header className="text-center pt-6 pb-2">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl glass mb-4">
-            <span className="text-3xl">🔬</span>
+      {/* Header */}
+      <header className="border-b border-[var(--color-outline)] bg-[var(--color-surface)]">
+        <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="text-2xl">🔬</span>
+            <div>
+              <h1 className="text-lg font-semibold text-[var(--color-on-surface)]">Research Gap Finder</h1>
+              <p className="text-xs text-[var(--color-on-surface-variant)]">Qwen 2.5-14B · LoRA · HDBSCAN · Semantic Scholar</p>
+            </div>
           </div>
-          <h1 className="text-3xl md:text-4xl font-bold gradient-text tracking-tight mb-2">
-            Research Gap Finder
-          </h1>
-          <p className="text-slate-400 text-sm md:text-base max-w-lg mx-auto">
-            Paste a paper abstract to discover unexplored research opportunities,
-            powered by Qwen&nbsp;14B on a remote GPU.
-          </p>
-        </header>
+          <div className="flex items-center gap-2">
+            {healthErr ? (
+              <StatusChip label="API Offline" type="error" />
+            ) : health ? (
+              <>
+                <StatusChip label={health.mock_mode ? "Mock Mode" : "GPU Model Loaded"} type={health.mock_mode ? "warning" : "success"} />
+                <StatusChip label="API Online" type="success" />
+              </>
+            ) : (
+              <StatusChip label="Checking…" type="neutral" />
+            )}
+          </div>
+        </div>
+      </header>
 
-        {/* ── Backend URL Config ──────────────────────────────────────────── */}
-        <section className="glass rounded-2xl p-4 space-y-3" aria-label="Backend configuration">
-          <div className="flex items-center justify-between">
-            <label
-              htmlFor="backend-url-input"
-              className="text-xs font-semibold text-slate-400 uppercase tracking-widest"
-            >
-              Backend API URL
-            </label>
-            <StatusBadge url={backendUrl} />
-          </div>
-          <div className="flex gap-2">
-            <input
-              id="backend-url-input"
-              type="url"
-              value={urlInput}
-              onChange={(e) => setUrlInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && saveUrl()}
-              placeholder="https://xxxx.lhr.life"
-              className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/30 transition-all"
-              aria-label="Backend API URL input"
-            />
+      <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
+        {/* Mode tabs */}
+        <div className="flex border-b border-[var(--color-outline)]">
+          {modes.map((m) => (
             <button
-              onClick={saveUrl}
-              className="btn-glow rounded-xl px-5 py-2.5 text-sm font-semibold text-white whitespace-nowrap"
-              aria-label="Save backend URL"
+              key={m.key}
+              onClick={() => { setMode(m.key); setResult(null); }}
+              className={`tab ${mode === m.key ? "tab-active" : ""}`}
             >
-              {urlSaved ? "✓ Saved" : "Save"}
+              {m.icon} {m.label}
             </button>
-          </div>
-          <p className="text-xs text-slate-600">
-            Paste your tunnel URL each time the GPU server restarts. Saved in <code className="text-slate-500">localStorage</code>.
-          </p>
-        </section>
+          ))}
+        </div>
 
-        {/* ── Abstract Input ──────────────────────────────────────────────── */}
-        <section className="glass rounded-2xl p-4 space-y-3" aria-label="Abstract input">
-          <div className="flex items-center justify-between">
-            <label
-              htmlFor="abstract-input"
-              className="text-xs font-semibold text-slate-400 uppercase tracking-widest"
-            >
-              Paper Abstract
-            </label>
-            <span className="text-xs text-slate-600">
-              {abstract.length} chars
-              {abstract.length > 0 && abstract.length < 50 && (
-                <span className="text-red-400 ml-1">(min 50)</span>
-              )}
-            </span>
-          </div>
-          <textarea
-            id="abstract-input"
-            value={abstract}
-            onChange={(e) => setAbstract(e.target.value)}
-            onKeyDown={handleTextareaKeyDown}
-            rows={7}
-            placeholder="Paste your paper abstract here…"
-            className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/30 transition-all resize-y leading-relaxed"
-            aria-label="Paper abstract"
-            disabled={isLoading}
-          />
-          <div className="flex items-center justify-between flex-wrap gap-3">
-            {/* Quick fill button */}
-            <button
-              onClick={() => setAbstract(EXAMPLE_ABSTRACT)}
-              className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors underline-offset-2 hover:underline"
-              disabled={isLoading}
-            >
-              Try example abstract
-            </button>
-            {/* Number of gaps control */}
-            <div className="flex items-center gap-2">
-              <label htmlFor="top-k-input" className="text-xs text-slate-500">
-                Gaps to find:
-              </label>
-              <div className="flex items-center glass rounded-lg overflow-hidden">
-                {[3, 5, 7].map((n) => (
-                  <button
-                    key={n}
-                    onClick={() => setTopK(n)}
-                    disabled={isLoading}
-                    className={`px-3 py-1 text-xs font-medium transition-colors ${
-                      topK === n
-                        ? "bg-indigo-600 text-white"
-                        : "text-slate-400 hover:text-slate-200"
-                    }`}
-                    aria-pressed={topK === n}
-                  >
-                    {n}
+        {/* ── MANUAL MODE ── */}
+        {mode === "manual" && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr] gap-4">
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm font-medium text-[var(--color-on-surface)] mb-1">Paper Title</label>
+                  <input value={title} onChange={(e) => setTitle(e.target.value)} className="input-field" placeholder="e.g. Attention Is All You Need" disabled={isLoading} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-[var(--color-on-surface)] mb-1">Abstract</label>
+                  <textarea value={abstract} onChange={(e) => setAbstract(e.target.value)} rows={7} className="input-field resize-y" placeholder="Paste the paper abstract here…" disabled={isLoading} />
+                  <button onClick={() => { setTitle("Attention Is All You Need"); setAbstract(EXAMPLE_ABSTRACT); }} className="text-xs text-[var(--color-primary)] hover:underline mt-1" disabled={isLoading}>
+                    Try example
                   </button>
-                ))}
+                </div>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm font-medium text-[var(--color-on-surface)] mb-1">Citation IDs <span className="text-[var(--color-on-surface-variant)] font-normal">(optional)</span></label>
+                  <p className="text-xs text-[var(--color-on-surface-variant)] mb-2">arXiv IDs or DOIs, one per line</p>
+                  <textarea value={citations} onChange={(e) => setCitations(e.target.value)} rows={5} className="input-field resize-y" placeholder={"1706.03762\n10.1145/3442188.3445922"} disabled={isLoading} />
+                </div>
               </div>
             </div>
+            <button onClick={submitManual} disabled={isLoading || !title.trim() || !abstract.trim()} className="btn-primary w-full py-3 flex items-center justify-center gap-2">
+              {isLoading ? <><Spinner /> Analyzing…</> : "🚀 Find Research Gaps"}
+            </button>
           </div>
-        </section>
-
-        {/* ── Analyze Button ──────────────────────────────────────────────── */}
-        <button
-          id="analyze-button"
-          onClick={analyze}
-          disabled={isLoading || abstract.trim().length < 50 || !backendUrl}
-          className="btn-glow w-full rounded-2xl py-3.5 text-base font-semibold text-white flex items-center justify-center gap-3 transition-all"
-          aria-busy={isLoading}
-        >
-          {isLoading ? (
-            <>
-              <Spinner />
-              <span>Analyzing on GPU…</span>
-            </>
-          ) : (
-            <>
-              <span>🔍</span>
-              <span>Analyze Research Gaps</span>
-              <span className="text-xs text-white/50 ml-1 hidden sm:inline">
-                ⌘ Enter
-              </span>
-            </>
-          )}
-        </button>
-
-        {/* ── Loading Skeletons ───────────────────────────────────────────── */}
-        {isLoading && (
-          <section aria-label="Loading results" className="space-y-3">
-            <div className="flex items-center gap-2 px-1">
-              <div className="skeleton h-3 w-3 rounded-full" />
-              <div className="skeleton h-3 w-40 rounded" />
-            </div>
-            {Array.from({ length: topK }).map((_, i) => (
-              <GapCardSkeleton key={i} index={i} />
-            ))}
-          </section>
         )}
 
-        {/* ── Results ─────────────────────────────────────────────────────── */}
-        {!isLoading && result && (
-          <section aria-label="Analysis results" className="space-y-4">
-            {/* Meta bar */}
-            <div className="flex items-center justify-between px-1 text-xs text-slate-500">
-              <span>
-                {result.gaps.length} gap{result.gaps.length !== 1 ? "s" : ""} identified
-              </span>
-              <div className="flex items-center gap-3">
-                <span>
-                  Model:{" "}
-                  <span className="text-slate-400 font-medium">{result.model_used}</span>
-                </span>
-                <span>
-                  {result.gpu ? "🚀 GPU" : "💻 CPU"}
-                </span>
-              </div>
-            </div>
-
-            {/* Gap cards */}
+        {/* ── BATCH MODE ── */}
+        {mode === "batch" && (
+          <div className="space-y-4">
+            <p className="text-sm text-[var(--color-on-surface-variant)]">Add multiple papers to collectively identify research gaps across the series.</p>
             <div className="space-y-3">
-              {result.gaps.map((gap, i) => (
-                <GapCard key={i} gap={gap} index={i} />
+              {batchPapers.map((paper, i) => (
+                <div key={i} className="card p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-[var(--color-on-surface-variant)]">Paper {i + 1}</span>
+                    {batchPapers.length > 1 && (
+                      <button onClick={() => removeBatchRow(i)} className="text-xs text-[var(--color-error)] hover:underline">Remove</button>
+                    )}
+                  </div>
+                  <input value={paper.title} onChange={(e) => updateBatch(i, "title", e.target.value)} className="input-field" placeholder="Paper title" disabled={isLoading} />
+                  <textarea value={paper.abstract} onChange={(e) => updateBatch(i, "abstract", e.target.value)} rows={3} className="input-field resize-y" placeholder="Abstract" disabled={isLoading} />
+                </div>
               ))}
             </div>
-
-            {/* Export */}
-            <div className="flex justify-end pt-2">
-              <button
-                onClick={() => {
-                  const text = result.gaps
-                    .map((g, i) => `${i + 1}. ${g}`)
-                    .join("\n\n");
-                  navigator.clipboard.writeText(text);
-                  addToast("Gaps copied to clipboard!", "success");
-                }}
-                className="glass rounded-xl px-4 py-2 text-xs text-slate-400 hover:text-slate-200 hover:border-indigo-500/30 transition-all"
-              >
-                Copy all gaps
-              </button>
-            </div>
-          </section>
-        )}
-
-        {/* ── Empty State ─────────────────────────────────────────────────── */}
-        {!isLoading && !result && (
-          <div className="text-center py-12 text-slate-600 select-none">
-            <div className="text-5xl mb-3 opacity-30">🧬</div>
-            <p className="text-sm">
-              Paste an abstract and click Analyze to discover research gaps.
-            </p>
+            <button onClick={addBatchRow} className="btn-outlined px-4 py-2 w-full" disabled={isLoading}>+ Add Paper</button>
+            <button onClick={submitBatch} disabled={isLoading} className="btn-primary w-full py-3 flex items-center justify-center gap-2">
+              {isLoading ? <><Spinner /> Analyzing {batchPapers.filter((p) => p.title && p.abstract).length} papers…</> : "🚀 Analyze Paper Series"}
+            </button>
           </div>
         )}
 
-        {/* ── Footer ──────────────────────────────────────────────────────── */}
-        <footer className="text-center text-xs text-slate-700 pb-6">
-          Research Gap Finder · Qwen 2.5 14B · HDBSCAN · NetworkX · FastAPI
-        </footer>
-      </div>
+        {/* ── AUTO MODE ── */}
+        {mode === "auto" && (
+          <div className="space-y-4">
+            <div className="bg-[var(--color-primary-container)] border border-blue-200 rounded-lg p-4 text-sm text-[var(--color-on-surface)]">
+              Enter a Semantic Scholar-compatible paper ID. The pipeline will fetch the citation neighbourhood, then run the fine-tuned model to identify gaps.
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-[var(--color-on-surface)] mb-1">Seed Paper ID</label>
+              <input value={paperId} onChange={(e) => setPaperId(e.target.value)} className="input-field" placeholder="e.g. 1706.03762 or 10.1145/3442188.3445922" disabled={isLoading} />
+            </div>
+            <button onClick={submitAuto} disabled={isLoading || !paperId.trim()} className="btn-primary w-full py-3 flex items-center justify-center gap-2">
+              {isLoading ? <><Spinner /> Fetching citations & analyzing…</> : "🚀 Auto-Analyze"}
+            </button>
+          </div>
+        )}
+
+        {/* Loading skeletons */}
+        {isLoading && (
+          <div className="space-y-4">
+            {[...Array(3)].map((_, i) => (
+              <div key={i} className="card p-5 space-y-3">
+                <div className="skeleton h-4 w-1/3" />
+                <div className="skeleton h-3 w-full" />
+                <div className="skeleton h-3 w-4/5" />
+                <div className="skeleton h-3 w-2/3" />
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Results */}
+        {!isLoading && result && <ResultsView data={result} onCopy={copyGaps} />}
+
+        {/* Empty state */}
+        {!isLoading && !result && (
+          <div className="text-center py-16 text-[var(--color-on-surface-variant)]">
+            <p className="text-4xl mb-3 opacity-30">🧬</p>
+            <p className="text-sm">Select a mode and provide paper details to discover research gaps.</p>
+          </div>
+        )}
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t border-[var(--color-outline)] mt-8">
+        <div className="max-w-4xl mx-auto px-4 py-4 text-center text-xs text-[var(--color-on-surface-variant)]">
+          Research Gap Finder · Qwen 2.5-14B · LoRA Fine-Tuned · HDBSCAN Clustering · Semantic Scholar API · MLflow Tracked
+        </div>
+      </footer>
     </>
   );
 }
