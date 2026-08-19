@@ -231,6 +231,7 @@ def _start_tunnel() -> subprocess.Popen | None:
         try:
             proc = subprocess.Popen(
                 shlex.split(cmd),
+                stdin=subprocess.DEVNULL,  # Prevent SSH from swallowing terminal input!
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
