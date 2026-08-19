@@ -63,6 +63,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount the inference API so both run on the same port
+try:
+    from app.main import app as inference_app
+    app.mount("/inference", inference_app)
+    logger.info("Successfully mounted Inference API at /inference")
+except ImportError as e:
+    logger.warning(f"Could not mount Inference API: {e}")
+
 _agent = ResearchGapAgent()
 
 # In-memory cache for graph HTML, reports, and metadata

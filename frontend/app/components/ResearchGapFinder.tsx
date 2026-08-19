@@ -194,7 +194,7 @@ export default function ResearchGapFinder() {
 
   // Health check on mount
   useEffect(() => {
-    fetch(`${API_URL}/health`, { signal: AbortSignal.timeout(5000) })
+    fetch(`${API_URL}/inference/health`, { signal: AbortSignal.timeout(5000) })
       .then((r) => r.json())
       .then((d) => { setHealth(d); setHealthErr(false); })
       .catch(() => setHealthErr(true));
@@ -216,7 +216,7 @@ export default function ResearchGapFinder() {
       paper_id: id.trim(), title: id.trim(), abstract: "", citation_count: 0, is_influential: false, intents: [],
     }));
     try {
-      const res = await fetch(`${API_URL}/api/analyze-gap`, {
+      const res = await fetch(`${API_URL}/inference/api/analyze-gap`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: title.trim(), abstract: abstract.trim(), citations: citationList, references: [] }),
@@ -234,7 +234,7 @@ export default function ResearchGapFinder() {
     if (!valid.length) { toast("Add at least one paper with title and abstract."); return; }
     setIsLoading(true); setResult(null);
     try {
-      const res = await fetch(`${API_URL}/api/analyze-gap`, {
+      const res = await fetch(`${API_URL}/inference/api/analyze-gap`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ seed_papers: valid, citations: [], references: [] }),
@@ -269,7 +269,7 @@ export default function ResearchGapFinder() {
       }
 
       // Step 3: Run inference
-      const infRes = await fetch(`${API_URL}/api/analyze-gap`, {
+      const infRes = await fetch(`${API_URL}/inference/api/analyze-gap`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: seedTitle, abstract: seedAbstract, citations: [], references: [] }),
