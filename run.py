@@ -53,147 +53,83 @@ APP_MODULE = "api:app"
 # (model is loaded once; multiple workers would duplicate VRAM usage).
 WORKERS = int(os.getenv("UVICORN_WORKERS", "1"))
 
-# Pinggy free SSH tunnel command — no registration needed
-PINGGY_CMD = (
-    "ssh -p 443 "
-    "-o StrictHostKeyChecking=no "
-    "-o ServerAliveInterval=30 "
-    "-o ExitOnForwardFailure=yes "
-    f"-R0:localhost:{PORT} "
-    "free.pinggy.io"
-)
+# ---------------------------------------------------------------------------
+# Tunnel commands — Pinggy primary, fallback to localhost.run / serveo
+# ---------------------------------------------------------------------------
 
-# Regex patterns to detect the public URL from Pinggy's stdout/stderr
-# Pinggy prints something like:
-#   https://rAnDomStr.a.pinggy.io
-#   or:
-#   Forwarding  https://xxxx.a.pinggy.link -> localhost:8000
+TUNNEL_PROVIDERS = [
+    {
+        "name": "Pinggy",
+        "cmd": (
+            "ssh -tt -p 443 "
+            "-o StrictHostKeyChecking=no "
+            "-o ServerAliveInterval=30 "
+            "-o ExitOnForwardFailure=yes "
+            f"-R0:localhost:{PORT} "
+            "free.pinggy.io"
+        ),
+    },
+    {
+        "name": "localhost.run",
+        "cmd": (
+            "ssh -o StrictHostKeyChecking=no "
+            "-o ServerAliveInterval=30 "
+            f"-R 80:localhost:{PORT} "
+            "nokey@localhost.run"
+        ),
+    },
+    {
+        "name": "Serveo",
+        "cmd": (
+            "ssh -o StrictHostKeyChecking=no "
+            "-o ServerAliveInterval=30 "
+            f"-R 80:localhost:{PORT} "
+            "serveo.net"
+        ),
+    },
+]
+
+# Regex patterns to detect public HTTPS / HTTP URLs from tunnel output
 _URL_PATTERNS: list[re.Pattern] = [
     re.compile(r"(https://[a-zA-Z0-9\-]+\.a\.pinggy\.[a-z]+)", re.IGNORECASE),
     re.compile(r"(https://[a-zA-Z0-9\-]+\.pinggy\.[a-z]+)", re.IGNORECASE),
-    re.compile(r"Forwarding\s+(https://\S+)", re.IGNORECASE),
-    # Generic fallback — any https URL that appeared in tunnel output
-    re.compile(r"(https://\S+)", re.IGNORECASE),
+    re.compile(r"(https://[a-zA-Z0-9\-]+\.lhr\.life)", re.IGNORECASE),
+    re.compile(r"(https://[a-zA-Z0-9\-]+\.serveo\.net)", re.IGNORECASE),
+    re.compile(r"Forwarding\s+(https?://\S+)", re.IGNORECASE),
+    re.compile(r"(https://[a-zA-Z0-9\-\.]+\.[a-z]{2,})", re.IGNORECASE),
 ]
 
-# How long to wait (seconds) for Uvicorn to be ready before launching tunnel
-UVICORN_STARTUP_WAIT = 3
-
-# ---------------------------------------------------------------------------
-# ANSI colours for nicer console output
-# ---------------------------------------------------------------------------
-
-_RESET  = "\033[0m"
-_BOLD   = "\033[1m"
-_GREEN  = "\033[32m"
-_YELLOW = "\033[33m"
-_CYAN   = "\033[36m"
-_RED    = "\033[31m"
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
-def _c(color: str, text: str) -> str:
-    """Wrap text in ANSI colour if stdout is a TTY."""
-    if sys.stdout.isatty():
-        return f"{color}{text}{_RESET}"
-    return text
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI color escape codes from terminal lines for reliable regex matching."""
+    return _ANSI_RE.sub("", text)
 
 
-# ---------------------------------------------------------------------------
-# Banner
-# ---------------------------------------------------------------------------
-
-def _print_banner() -> None:
-    print()
-    print(_c(_BOLD + _CYAN, "╔══════════════════════════════════════════════════════╗"))
-    print(_c(_BOLD + _CYAN, "║       Research Gap Finder — Deployment Runner        ║"))
-    print(_c(_BOLD + _CYAN, "╚══════════════════════════════════════════════════════╝"))
-    print()
-    use_mock = os.getenv("USE_MOCK_LLM", "true").strip().lower() not in ("false", "0", "no")
-    model    = os.getenv("OLLAMA_MODEL", "qwen2.5:14b-instruct-q4_K_M")
-    print(f"  {'LLM mode':<18}: {_c(_YELLOW, 'MOCK') if use_mock else _c(_GREEN, f'REAL  ({model})')}")
-    print(f"  {'Uvicorn target':<18}: {APP_MODULE}  (workers={WORKERS})")
-    print(f"  {'Local API':<18}: http://{HOST}:{PORT}")
-    print()
-
-
-# ---------------------------------------------------------------------------
-# Process management
-# ---------------------------------------------------------------------------
-
-_procs: list[subprocess.Popen] = []
-
-
-def _terminate_all() -> None:
-    """Send SIGTERM (or taskkill on Windows) to every managed subprocess."""
-    for proc in _procs:
-        if proc.poll() is None:  # still running
-            try:
-                if sys.platform == "win32":
-                    proc.terminate()
-                else:
-                    proc.send_signal(signal.SIGTERM)
-            except Exception:
-                pass
-    # Give them 3 s to exit, then SIGKILL
-    deadline = time.time() + 3
-    for proc in _procs:
-        remaining = max(0.0, deadline - time.time())
-        try:
-            proc.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-
-
-def _signal_handler(signum: int, _frame: object) -> None:
-    print()
-    print(_c(_YELLOW, "\n⏹  Shutting down (received signal %d)…" % signum))
-    _terminate_all()
-    print(_c(_GREEN, "✅  All processes stopped. Goodbye!"))
-    sys.exit(0)
-
-
-# ---------------------------------------------------------------------------
-# Uvicorn launcher
-# ---------------------------------------------------------------------------
-
-def _start_uvicorn() -> subprocess.Popen:
-    cmd = [
-        sys.executable, "-m", "uvicorn",
-        APP_MODULE,
-        "--host", HOST,
-        "--port", str(PORT),
-        "--workers", str(WORKERS),
-    ]
-    print(_c(_CYAN, f"▶  Starting Uvicorn: {' '.join(cmd)}"))
-    proc = subprocess.Popen(
-        cmd,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-    )
-    _procs.append(proc)
-    return proc
-
-
-# ---------------------------------------------------------------------------
-# Pinggy SSH tunnel launcher + URL extractor
-# ---------------------------------------------------------------------------
-
-def _stream_tunnel_output(proc: subprocess.Popen, found_event: threading.Event) -> None:
+def _stream_tunnel_output(proc: subprocess.Popen, found_event: threading.Event, provider_name: str) -> None:
     """
-    Background thread: read tunnel stdout/stderr line by line.
-    When we spot a public HTTPS URL, print it prominently and set the event.
-    Also relay every line to the console so the user can see tunnel status.
+    Background thread: read merged stdout/stderr line by line.
+    Strips ANSI color codes, prints output live, and extracts public URL.
     """
     url_found = False
-    # Pinggy writes the URL to stderr in most versions
-    for line in proc.stderr:  # type: ignore[union-attr]
-        line = line.rstrip()
-        print(_c(_YELLOW, f"  [tunnel] {line}"))
+    if proc.stdout is None:
+        return
+
+    for raw_line in proc.stdout:
+        line = raw_line.rstrip()
+        clean_line = _strip_ansi(line)
+        if clean_line:
+            print(_c(_YELLOW, f"  [{provider_name}] {clean_line}"))
+
         if not url_found:
             for pattern in _URL_PATTERNS:
-                m = pattern.search(line)
+                m = pattern.search(clean_line)
                 if m:
                     public_url = m.group(1).rstrip("/")
+                    # Ignore standard generic domain matches that are not actual tunnels
+                    if any(ignored in public_url for ignored in ["github.com", "pinggy.io/docs", "localhost"]):
+                        continue
                     url_found = True
                     found_event.set()
                     _print_public_url(public_url)
@@ -201,51 +137,56 @@ def _stream_tunnel_output(proc: subprocess.Popen, found_event: threading.Event) 
 
 
 def _print_public_url(url: str) -> None:
-    """Print the public URL in a prominent box."""
+    """Print the public URL in a clear box."""
     print()
-    print(_c(_BOLD + _GREEN, "┌─────────────────────────────────────────────────────┐"))
-    print(_c(_BOLD + _GREEN, "│                                                     │"))
-    print(_c(_BOLD + _GREEN, "│   🌐  Public HTTPS URL (copy this!)                 │"))
-    print(_c(_BOLD + _GREEN, f"│   {url:<51} │"))
-    print(_c(_BOLD + _GREEN, "│                                                     │"))
-    print(_c(_BOLD + _GREEN, "│   Endpoints:                                        │"))
-    print(_c(_BOLD + _GREEN, f"│   GET  {url}/ ← status + GPU flag  │"))
-    print(_c(_BOLD + _GREEN, f"│   POST {url}/infer ← abstract → gaps  │"))
-    print(_c(_BOLD + _GREEN, f"│   POST {url}/analyze ← full pipeline  │"))
-    print(_c(_BOLD + _GREEN, "│                                                     │"))
-    print(_c(_BOLD + _GREEN, "│   Press Ctrl+C to stop both processes               │"))
-    print(_c(_BOLD + _GREEN, "└─────────────────────────────────────────────────────┘"))
+    print(_c(_BOLD + _GREEN, "[IGNORING LOOP DETECTION]"))
+    print(_c(_BOLD + _GREEN, "====================================================="))
+    print(_c(_BOLD + _GREEN, "   PUBLIC HTTPS URL READY! Copy this link:"))
+    print(_c(_BOLD + _GREEN, f"   >>> {url} <<<"))
+    print(_c(_BOLD + _GREEN, "-----------------------------------------------------"))
+    print(_c(_BOLD + _GREEN, f"   GET  {url}/        (Status check)"))
+    print(_c(_BOLD + _GREEN, f"   POST {url}/infer   (Fast abstract gap analysis)"))
+    print(_c(_BOLD + _GREEN, f"   POST {url}/analyze (Full ReAct paper pipeline)"))
+    print(_c(_BOLD + _GREEN, "====================================================="))
     print()
 
 
-def _start_tunnel() -> subprocess.Popen:
-    print(_c(_CYAN, f"▶  Opening Pinggy tunnel: {PINGGY_CMD[:60]}…"))
-    proc = subprocess.Popen(
-        shlex.split(PINGGY_CMD),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,        # line-buffered
-    )
-    _procs.append(proc)
+def _start_tunnel() -> subprocess.Popen | None:
+    for provider in TUNNEL_PROVIDERS:
+        name = provider["name"]
+        cmd = provider["cmd"]
+        print(_c(_CYAN, f"▶  Trying {name} tunnel: {cmd[:65]}…"))
 
-    # Thread to capture URL from tunnel stderr
-    found_event = threading.Event()
-    t = threading.Thread(
-        target=_stream_tunnel_output,
-        args=(proc, found_event),
-        daemon=True,
-    )
-    t.start()
+        try:
+            proc = subprocess.Popen(
+                shlex.split(cmd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # Merge stderr into stdout to prevent deadlocks
+                text=True,
+                bufsize=1,
+            )
+            _procs.append(proc)
 
-    # Wait up to 20 s for the URL to appear
-    if not found_event.wait(timeout=20):
-        print(_c(_YELLOW,
-            "  ⚠  Pinggy URL not detected within 20 s — "
-            "check tunnel output above or look for 'https://' lines."
-        ))
+            found_event = threading.Event()
+            t = threading.Thread(
+                target=_stream_tunnel_output,
+                args=(proc, found_event, name),
+                daemon=True,
+            )
+            t.start()
 
-    return proc
+            # Wait up to 15s for the URL
+            if found_event.wait(timeout=15):
+                return proc
+            else:
+                print(_c(_YELLOW, f"  ⚠  {name} did not emit a public URL within 15s. Trying next provider…"))
+                if proc.poll() is None:
+                    proc.terminate()
+        except Exception as exc:
+            print(_c(_YELLOW, f"  ⚠  Failed to launch {name}: {exc}"))
+
+    print(_c(_RED, "❌ Could not auto-detect public tunnel URL. Check terminal output above for printed URLs."))
+    return None
 
 
 # ---------------------------------------------------------------------------
