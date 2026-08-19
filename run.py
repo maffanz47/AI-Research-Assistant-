@@ -46,7 +46,7 @@ TUNNEL_PROVIDERS = [
     {
         "name": "Pinggy",
         "cmd": (
-            "ssh -tt -p 443 "
+            "ssh -p 443 "
             "-o StrictHostKeyChecking=no "
             "-o ServerAliveInterval=30 "
             "-o ExitOnForwardFailure=yes "
@@ -211,7 +211,6 @@ def _stream_tunnel_output(proc: subprocess.Popen, found_event: threading.Event, 
 
 def _print_public_url(url: str) -> None:
     print()
-    print(_c(_BOLD + _GREEN, "[IGNORING LOOP DETECTION]"))
     print(_c(_BOLD + _GREEN, "====================================================="))
     print(_c(_BOLD + _GREEN, "   PUBLIC HTTPS URL READY! Copy this link:"))
     print(_c(_BOLD + _GREEN, f"   >>> {url} <<<"))
