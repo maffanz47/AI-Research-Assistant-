@@ -75,7 +75,7 @@ _proc: subprocess.Popen | None = None
 
 def _signal_handler(signum: int, _frame: object) -> None:
     print()
-    print(_c(_YELLOW, "⏹  Shutting down (received signal %d)…" % signum))
+    print(_c(_YELLOW, "Shutting down (received signal %d)..." % signum))
     if _proc and _proc.poll() is None:
         try:
             if sys.platform == "win32":
@@ -88,7 +88,7 @@ def _signal_handler(signum: int, _frame: object) -> None:
             _proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             _proc.kill()
-    print(_c(_GREEN, "✅  Server stopped. Goodbye!"))
+    print(_c(_GREEN, "Server stopped. Goodbye!"))
     sys.exit(0)
 
 
@@ -112,7 +112,7 @@ def main() -> None:
         "--port", str(PORT),
         "--workers", str(WORKERS),
     ]
-    print(_c(_CYAN, f"▶  Starting: {' '.join(cmd)}"))
+    print(_c(_CYAN, f"Starting: {' '.join(cmd)}"))
     print()
 
     _proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
@@ -120,11 +120,11 @@ def main() -> None:
     # Wait briefly to check for immediate crashes
     time.sleep(2)
     if _proc.poll() is not None:
-        print(_c(_RED, f"✗  Uvicorn exited early (code {_proc.returncode})."))
+        print(_c(_RED, f"Uvicorn exited early (code {_proc.returncode})."))
         sys.exit(1)
 
-    print(_c(_GREEN, f"✓  Server running at http://{HOST}:{PORT}"))
-    print(_c(_GREEN, "   Press Ctrl+C to stop."))
+    print(_c(_GREEN, f"Server running at http://{HOST}:{PORT}"))
+    print(_c(_GREEN, "Press Ctrl+C to stop."))
     print()
 
     # Block until process exits
