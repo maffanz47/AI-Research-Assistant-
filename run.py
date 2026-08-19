@@ -6,28 +6,15 @@ Single-command runner for the Research Gap Finder FastAPI backend.
 What it does
 ------------
 1. Starts Uvicorn serving api:app on http://127.0.0.1:8000
-2. Launches a Pinggy SSH reverse tunnel that exposes port 8000 publicly
-   over HTTPS (no account or token required for the free tier)
-3. Parses the tunnel output and prints the public HTTPS URL clearly so
-   you can copy it straight into your frontend config or share it
-4. On Ctrl+C: gracefully terminates BOTH Uvicorn and the SSH tunnel
+2. Launches a reverse SSH tunnel (Pinggy -> localhost.run -> Serveo)
+   that exposes port 8000 publicly over HTTPS
+3. Parses tunnel output, strips ANSI colors, and prints the public HTTPS URL
+4. On Ctrl+C: cleanly terminates BOTH Uvicorn and the SSH tunnel
 
 Usage
 -----
-  # On the remote GPU machine (after git pull):
-  python run.py
-
-  # Switch to real Qwen model:
-  USE_MOCK_LLM=false python run.py
-
-  # Custom Uvicorn workers:
-  UVICORN_WORKERS=2 python run.py
-
-Zero-config — reads USE_MOCK_LLM / OLLAMA_MODEL / OLLAMA_BASE_URL
-from the environment; no .env file required (but supported if present).
-
-Dependencies: standard library only (subprocess, threading, re, time, os,
-              signal, sys, shlex).
+  python run.py                     # Mock LLM mode
+  USE_MOCK_LLM=false python run.py # Real Qwen LLM mode
 """
 
 from __future__ import annotations
@@ -42,19 +29,17 @@ import threading
 import time
 
 # ---------------------------------------------------------------------------
-# Configuration — all overridable via environment variables
+# Configuration
 # ---------------------------------------------------------------------------
 
-HOST = "127.0.0.1"          # Uvicorn binds locally; tunnel exposes it
+HOST = "127.0.0.1"
 PORT = 8000
 APP_MODULE = "api:app"
-
-# Number of Uvicorn worker processes. Keep 1 for GPU machines
-# (model is loaded once; multiple workers would duplicate VRAM usage).
 WORKERS = int(os.getenv("UVICORN_WORKERS", "1"))
+UVICORN_STARTUP_WAIT = 3
 
 # ---------------------------------------------------------------------------
-# Tunnel commands — Pinggy primary, fallback to localhost.run / serveo
+# Tunnel providers (pinggy -> localhost.run -> serveo)
 # ---------------------------------------------------------------------------
 
 TUNNEL_PROVIDERS = [
@@ -89,7 +74,7 @@ TUNNEL_PROVIDERS = [
     },
 ]
 
-# Regex patterns to detect public HTTPS / HTTP URLs from tunnel output
+# Regex patterns to extract URLs
 _URL_PATTERNS: list[re.Pattern] = [
     re.compile(r"(https://[a-zA-Z0-9\-]+\.a\.pinggy\.[a-z]+)", re.IGNORECASE),
     re.compile(r"(https://[a-zA-Z0-9\-]+\.pinggy\.[a-z]+)", re.IGNORECASE),
@@ -101,17 +86,106 @@ _URL_PATTERNS: list[re.Pattern] = [
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
+# ---------------------------------------------------------------------------
+# ANSI Terminal Formatting Helpers
+# ---------------------------------------------------------------------------
+
+_RESET  = "\033[0m"
+_BOLD   = "\033[1m"
+_GREEN  = "\033[32m"
+_YELLOW = "\033[33m"
+_CYAN   = "\033[36m"
+_RED    = "\033[31m"
+
+
+def _c(color: str, text: str) -> str:
+    """Wrap text in ANSI colour if stdout is a TTY."""
+    if sys.stdout.isatty():
+        return f"{color}{text}{_RESET}"
+    return text
+
 
 def _strip_ansi(text: str) -> str:
-    """Remove ANSI color escape codes from terminal lines for reliable regex matching."""
+    """Remove ANSI escape sequences for reliable regex matching."""
     return _ANSI_RE.sub("", text)
 
 
+def _print_banner() -> None:
+    print()
+    print(_c(_BOLD + _CYAN, "======================================================"))
+    print(_c(_BOLD + _CYAN, "       Research Gap Finder — Deployment Runner        "))
+    print(_c(_BOLD + _CYAN, "======================================================"))
+    print()
+    use_mock = os.getenv("USE_MOCK_LLM", "true").strip().lower() not in ("false", "0", "no")
+    model    = os.getenv("OLLAMA_MODEL", "qwen2.5:14b-instruct-q4_K_M")
+    print(f"  {'LLM mode':<18}: {_c(_YELLOW, 'MOCK') if use_mock else _c(_GREEN, f'REAL  ({model})')}")
+    print(f"  {'Uvicorn target':<18}: {APP_MODULE}  (workers={WORKERS})")
+    print(f"  {'Local API':<18}: http://{HOST}:{PORT}")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Process Management & Signal Handlers
+# ---------------------------------------------------------------------------
+
+_procs: list[subprocess.Popen] = []
+
+
+def _terminate_all() -> None:
+    """Send SIGTERM (or taskkill on Windows) to every managed subprocess."""
+    for proc in _procs:
+        if proc.poll() is None:
+            try:
+                if sys.platform == "win32":
+                    proc.terminate()
+                else:
+                    proc.send_signal(signal.SIGTERM)
+            except Exception:
+                pass
+    deadline = time.time() + 3
+    for proc in _procs:
+        remaining = max(0.0, deadline - time.time())
+        try:
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def _signal_handler(signum: int, _frame: object) -> None:
+    print()
+    print(_c(_YELLOW, "\n⏹  Shutting down (received signal %d)…" % signum))
+    _terminate_all()
+    print(_c(_GREEN, "✅  All processes stopped. Goodbye!"))
+    sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# Uvicorn Process Launcher
+# ---------------------------------------------------------------------------
+
+def _start_uvicorn() -> subprocess.Popen:
+    cmd = [
+        sys.executable, "-m", "uvicorn",
+        APP_MODULE,
+        "--host", HOST,
+        "--port", str(PORT),
+        "--workers", str(WORKERS),
+    ]
+    print(_c(_CYAN, f"▶  Starting Uvicorn: {' '.join(cmd)}"))
+    proc = subprocess.Popen(
+        cmd,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
+    _procs.append(proc)
+    return proc
+
+
+# ---------------------------------------------------------------------------
+# Tunnel Launcher & Output Stream Reader
+# ---------------------------------------------------------------------------
+
 def _stream_tunnel_output(proc: subprocess.Popen, found_event: threading.Event, provider_name: str) -> None:
-    """
-    Background thread: read merged stdout/stderr line by line.
-    Strips ANSI color codes, prints output live, and extracts public URL.
-    """
     url_found = False
     if proc.stdout is None:
         return
@@ -127,7 +201,6 @@ def _stream_tunnel_output(proc: subprocess.Popen, found_event: threading.Event, 
                 m = pattern.search(clean_line)
                 if m:
                     public_url = m.group(1).rstrip("/")
-                    # Ignore standard generic domain matches that are not actual tunnels
                     if any(ignored in public_url for ignored in ["github.com", "pinggy.io/docs", "localhost"]):
                         continue
                     url_found = True
@@ -137,7 +210,6 @@ def _stream_tunnel_output(proc: subprocess.Popen, found_event: threading.Event, 
 
 
 def _print_public_url(url: str) -> None:
-    """Print the public URL in a clear box."""
     print()
     print(_c(_BOLD + _GREEN, "[IGNORING LOOP DETECTION]"))
     print(_c(_BOLD + _GREEN, "====================================================="))
@@ -161,7 +233,7 @@ def _start_tunnel() -> subprocess.Popen | None:
             proc = subprocess.Popen(
                 shlex.split(cmd),
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # Merge stderr into stdout to prevent deadlocks
+                stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
             )
@@ -175,7 +247,6 @@ def _start_tunnel() -> subprocess.Popen | None:
             )
             t.start()
 
-            # Wait up to 15s for the URL
             if found_event.wait(timeout=15):
                 return proc
             else:
@@ -190,11 +261,10 @@ def _start_tunnel() -> subprocess.Popen | None:
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Main Execution Entrypoint
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    # Register Ctrl+C / SIGTERM handlers
     signal.signal(signal.SIGINT,  _signal_handler)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, _signal_handler)
@@ -203,26 +273,24 @@ def main() -> None:
 
     # 1. Start Uvicorn
     uvicorn_proc = _start_uvicorn()
-    print(_c(_YELLOW, f"  Waiting {UVICORN_STARTUP_WAIT}s for Uvicorn to initialise (model load)…"))
+    print(_c(_YELLOW, f"  Waiting {UVICORN_STARTUP_WAIT}s for Uvicorn to initialise…"))
     time.sleep(UVICORN_STARTUP_WAIT)
 
-    # Check Uvicorn didn't die immediately (e.g. port conflict)
     if uvicorn_proc.poll() is not None:
         print(_c(_RED, f"✗  Uvicorn exited early (code {uvicorn_proc.returncode})."))
-        print(_c(_RED,  "   Check port conflicts: lsof -i :8000"))
         sys.exit(1)
 
     print(_c(_GREEN, f"✓  Uvicorn is up at http://{HOST}:{PORT}"))
     print()
 
-    # 2. Start Pinggy tunnel
+    # 2. Start SSH reverse tunnel
     _start_tunnel()
 
-    # 3. Block until Uvicorn exits naturally or user hits Ctrl+C
+    # 3. Keep running until Ctrl+C
     try:
         uvicorn_proc.wait()
     except KeyboardInterrupt:
-        pass  # signal handler will clean up
+        pass
     finally:
         _terminate_all()
 
