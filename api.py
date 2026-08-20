@@ -212,8 +212,150 @@ def infer(req: InferRequest) -> InferResponse:
     return InferResponse(gaps=gaps, model_used=OLLAMA_MODEL, gpu=gpu_available)
 
 
+# ---------------------------------------------------------------------------
+# /analyze-by-id — Auto mode endpoint: server-side S2 fetch + inference
+# ---------------------------------------------------------------------------
+
+S2_API = "https://api.semanticscholar.org/graph/v1/paper"
+S2_FIELDS = "title,abstract,authors,year,externalIds"
+
+
+class AnalyzeByIdRequest(BaseModel):
+    paper_id: str = Field(..., description="arXiv ID (e.g. 1706.03762), DOI, or Semantic Scholar ID")
+    top_k_gaps: int = Field(default=3, ge=1, le=10)
+
+
+class GapItem(BaseModel):
+    gap_id: int
+    title: str
+    description: str
+    evidence: str
+    recommended_action: str
+
+
+class AnalyzeByIdResponse(BaseModel):
+    seed_titles: list[str]
+    executive_summary: str
+    gaps: list[GapItem]
+    model_used: str
+
+
+@app.post("/analyze-by-id", response_model=AnalyzeByIdResponse, tags=["Inference"])
+def analyze_by_id(req: AnalyzeByIdRequest) -> AnalyzeByIdResponse:
+    """
+    Auto mode: fetch paper metadata from Semantic Scholar (server-side) then
+    run the lightweight /infer pipeline and return structured gap cards.
+    Server-side fetch avoids browser CORS/rate-limit issues with the S2 API.
+    """
+    paper_id = req.paper_id.strip()
+    if not paper_id:
+        raise HTTPException(status_code=422, detail="paper_id must not be empty.")
+
+    # ── Fetch from Semantic Scholar ──────────────────────────────────────────
+    try:
+        s2_resp = _requests.get(
+            f"{S2_API}/{paper_id}",
+            params={"fields": S2_FIELDS},
+            timeout=15,
+            headers={"User-Agent": "ResearchGapFinder/1.0"},
+        )
+        if s2_resp.status_code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Paper '{paper_id}' not found on Semantic Scholar. "
+                       "Try the full arXiv ID (e.g. 1706.03762)."
+            )
+        s2_resp.raise_for_status()
+        s2_data: dict[str, Any] = s2_resp.json()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Semantic Scholar fetch failed for paper_id=%s", paper_id)
+        raise HTTPException(status_code=502, detail=f"Semantic Scholar error: {exc}") from exc
+
+    seed_title: str = s2_data.get("title") or paper_id
+    abstract: str = s2_data.get("abstract") or ""
+    year: int | None = s2_data.get("year")
+
+    if not abstract:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Paper '{seed_title}' has no abstract on Semantic Scholar. Use Manual mode instead."
+        )
+
+    # ── Detect GPU ───────────────────────────────────────────────────────────
+    gpu_available = False
+    try:
+        import torch
+        gpu_available = torch.cuda.is_available()
+    except ImportError:
+        pass
+
+    # ── Run inference (reuse /infer logic) ───────────────────────────────────
+    if USE_MOCK_LLM:
+        gaps_text = [
+            f"Gap {i}: Placeholder gap #{i} — set USE_MOCK_LLM=false for real Qwen inference."
+            for i in range(1, req.top_k_gaps + 1)
+        ]
+        model_name = "mock"
+    else:
+        prompt = (
+            f"You are an expert research analyst.\n\n"
+            f"Given the following paper abstract, identify exactly {req.top_k_gaps} "
+            f"specific, actionable research gaps NOT addressed by this paper.\n"
+            f"Format your response as a numbered list with one gap per line.\n\n"
+            f"Abstract:\n{abstract}\n\nResearch Gaps:"
+        )
+        payload = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.2, "num_predict": 1024},
+        }
+        try:
+            resp = _requests.post(
+                f"{OLLAMA_BASE_URL}/api/generate",
+                json=payload,
+                timeout=300,
+            )
+            resp.raise_for_status()
+            raw_text: str = resp.json().get("response", "")
+        except Exception as exc:
+            logger.exception("/analyze-by-id Ollama request failed.")
+            raise HTTPException(status_code=502, detail=f"Ollama error: {exc}") from exc
+
+        lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+        gaps_text = [ln for ln in lines if ln and (ln[0].isdigit() or ln.startswith("-"))][:req.top_k_gaps]
+        if not gaps_text:
+            gaps_text = lines[:req.top_k_gaps]
+        model_name = OLLAMA_MODEL
+
+    # ── Build structured response ────────────────────────────────────────────
+    gap_items = [
+        GapItem(
+            gap_id=i + 1,
+            title=text.replace(r"^\d+[.)]\s*", "").split(".")[0][:80],
+            description=text.lstrip("0123456789.) "),
+            evidence=f'Identified from abstract of "{seed_title}"',
+            recommended_action="Investigate this gap as a potential research direction.",
+        )
+        for i, text in enumerate(gaps_text)
+    ]
+
+    return AnalyzeByIdResponse(
+        seed_titles=[seed_title],
+        executive_summary=(
+            f'Auto-analysis of "{seed_title}" ({year or "N/A"}). '
+            f'{"Running on GPU." if gpu_available else "Running in CPU/mock mode."}'
+        ),
+        gaps=gap_items,
+        model_used=model_name,
+    )
+
+
 @app.post("/analyze", response_model=AnalyzeResponse, tags=["Pipeline"])
 def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
+
     """
     Run the full Research Gap Finder analysis pipeline.
     1. Fetches paper neighbourhood (references + forward citations)
