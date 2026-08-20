@@ -52,3 +52,5 @@ unsloth_compiled_cache/
 Thumbs.db
 /cache
 /lora_adapter
+
+report/
