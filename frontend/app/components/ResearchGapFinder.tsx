@@ -274,40 +274,52 @@ export default function ResearchGapFinder() {
   }, [batchPapers, toast]);
 
   // ── Auto mode submit ──
+  // Flow: browser → Semantic Scholar API (fetch metadata) → backend /infer (lightweight gap endpoint)
   const submitAuto = useCallback(async () => {
     if (!backendUrl) { toast("Save a Backend URL first."); return; }
     if (!paperId.trim()) { toast("Enter a paper ID."); return; }
     setIsLoading(true); setResult(null);
     try {
-      // Step 1: Fetch from pipeline API
-      const pipeRes = await fetch(`${backendUrl}/analyze`, {
+      // Step 1: Fetch paper metadata directly from Semantic Scholar in the browser
+      toast("Fetching paper metadata from Semantic Scholar...", "info");
+      const s2Res = await fetch(
+        `https://api.semanticscholar.org/graph/v1/paper/${encodeURIComponent(paperId.trim())}?fields=title,abstract,authors,year`,
+        { signal: AbortSignal.timeout(15000) }
+      );
+      if (!s2Res.ok) throw new Error(`Semantic Scholar error ${s2Res.status}: Paper ID not found. Try the full arXiv ID (e.g. 1706.03762).`);
+      const s2 = await s2Res.json();
+      const seedTitle: string = s2.title || paperId.trim();
+      const seedAbstract: string = s2.abstract || "";
+      if (!seedAbstract) throw new Error("This paper has no abstract on Semantic Scholar. Try Manual mode instead.");
+
+      // Step 2: Call the lightweight /infer endpoint on the backend
+      toast("Running AI analysis...", "info");
+      const inferRes = await fetch(`${backendUrl}/infer`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paper_id: paperId.trim() }),
+        body: JSON.stringify({ abstract: seedAbstract, top_k_gaps: 3 }),
       });
-      if (!pipeRes.ok) throw new Error(`Pipeline error ${pipeRes.status}`);
+      if (!inferRes.ok) throw new Error(`Backend error ${inferRes.status}: ${await inferRes.text()}`);
+      const inferData: { gaps: string[]; model_used: string; gpu: boolean } = await inferRes.json();
 
-      // Step 2: Fetch seed metadata via Semantic Scholar
-      const s2Res = await fetch(`https://api.semanticscholar.org/graph/v1/paper/${paperId.trim()}?fields=title,abstract`, { signal: AbortSignal.timeout(10000) });
-      let seedTitle = paperId.trim(), seedAbstract = "Abstract not available.";
-      if (s2Res.ok) {
-        const s2 = await s2Res.json();
-        seedTitle = s2.title || seedTitle;
-        seedAbstract = s2.abstract || seedAbstract;
-      }
-
-      // Step 3: Run inference
-      const infRes = await fetch(`${backendUrl}/inference/api/analyze-gap`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: seedTitle, abstract: seedAbstract, citations: [], references: [] }),
-      });
-      if (!infRes.ok) throw new Error(`Inference error ${infRes.status}`);
-      setResult(await infRes.json());
+      // Step 3: Convert /infer response into the AnalyzeGapResponse shape the UI expects
+      const structured: AnalyzeGapResponse = {
+        seed_titles: [seedTitle],
+        executive_summary: `Auto-analysis of "${seedTitle}" (${s2.year || "N/A"}). ${inferData.gpu ? "Running on GPU." : "Running in mock mode."}`,
+        model_used: inferData.model_used,
+        gaps: inferData.gaps.map((text, i) => ({
+          gap_id: i + 1,
+          title: text.replace(/^\d+[\.\)]\s*/, "").split(".")[0].substring(0, 80),
+          description: text.replace(/^\d+[\.\)]\s*/, ""),
+          evidence: `Identified from analysis of "${seedTitle}"`,
+          recommended_action: "Investigate this gap as a potential research direction.",
+        })),
+      };
+      setResult(structured);
       toast("Auto-analysis complete!", "success");
     } catch (e) { toast((e as Error).message); }
     finally { setIsLoading(false); }
-  }, [paperId, toast]);
+  }, [paperId, backendUrl, toast]);
 
   // Batch row helpers
   const updateBatch = (i: number, field: "title" | "abstract", value: string) => {
