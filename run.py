@@ -101,32 +101,34 @@ def _signal_handler(signum: int, _frame: object) -> None:
 # ---------------------------------------------------------------------------
 # Tunnel URL reader (runs in a background thread)
 # ---------------------------------------------------------------------------
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-_URL_RE  = re.compile(r"https://[a-zA-Z0-9\-]+\.lhr\.life")
+import json
 
 def _read_tunnel_output(proc: subprocess.Popen) -> None:
     """Read tunnel output line-by-line and print the HTTPS URL when found."""
     assert proc.stdout is not None
     url_printed = False
     for raw in proc.stdout:
-        line = _ANSI_RE.sub("", raw.rstrip())
-        if not url_printed:
-            m = _URL_RE.search(line)
-            if m:
-                url = m.group(0)
-                url_printed = True
-                print()
-                print(_c(_BOLD + _GREEN, "=" * 56))
-                print(_c(_BOLD + _GREEN, "  PUBLIC HTTPS URL READY"))
-                print(_c(_BOLD + _GREEN, "=" * 56))
-                print()
-                print(_c(_BOLD + _GREEN, f"  >>> {url}"))
-                print()
-                print(_c(_GREEN,  "  Paste this URL into your Vercel frontend."))
-                print(_c(_YELLOW, "  It changes each time the server restarts."))
-                print()
-                print(_c(_CYAN,  "  Press Ctrl+C to stop the server."))
-                print()
+        line = raw.strip()
+        if not url_printed and line.startswith("{") and line.endswith("}"):
+            try:
+                data = json.loads(line)
+                if "domain" in data:
+                    url = f"https://{data['domain']}"
+                    url_printed = True
+                    print()
+                    print(_c(_BOLD + _GREEN, "=" * 56))
+                    print(_c(_BOLD + _GREEN, "  PUBLIC HTTPS URL READY"))
+                    print(_c(_BOLD + _GREEN, "=" * 56))
+                    print()
+                    print(_c(_BOLD + _GREEN, f"  >>> {url}"))
+                    print()
+                    print(_c(_GREEN,  "  Paste this URL into your Vercel frontend."))
+                    print(_c(_YELLOW, "  It changes each time the server restarts."))
+                    print()
+                    print(_c(_CYAN,  "  Press Ctrl+C to stop the server."))
+                    print()
+            except json.JSONDecodeError:
+                pass
 
 
 # ---------------------------------------------------------------------------
