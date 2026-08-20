@@ -32,7 +32,7 @@ PORT    = int(os.getenv("UVICORN_PORT", "8000"))
 MODULE  = "api:app"
 WORKERS = int(os.getenv("UVICORN_WORKERS", "1"))
 
-# SSH tunnel command — localhost.run; no account needed
+# SSH tunnel command — localhost.run plain text mode (most reliable)
 TUNNEL_CMD = [
     "ssh",
     "-o", "StrictHostKeyChecking=no",
@@ -41,8 +41,6 @@ TUNNEL_CMD = [
     "-o", "ExitOnForwardFailure=yes",
     "-R", f"80:localhost:{PORT}",
     "nokey@localhost.run",
-    "--",
-    "--output=json",
 ]
 
 # ---------------------------------------------------------------------------
@@ -103,7 +101,8 @@ def _signal_handler(signum: int, _frame: object) -> None:
 # ---------------------------------------------------------------------------
 import re
 
-_DOMAIN_RE = re.compile(r'"domain"\s*:\s*"([^"]+\.lhr\.life)"')
+# Match any https URL printed by localhost.run in plain-text mode
+_URL_RE = re.compile(r'https://[\w\-]+\.lhr\.life')
 
 def _read_tunnel_output(proc: subprocess.Popen) -> None:
     """Read tunnel output line-by-line and print the HTTPS URL when found."""
@@ -112,9 +111,9 @@ def _read_tunnel_output(proc: subprocess.Popen) -> None:
     for raw in proc.stdout:
         line = raw.strip()
         if not url_printed:
-            m = _DOMAIN_RE.search(line)
+            m = _URL_RE.search(line)
             if m:
-                url = f"https://{m.group(1)}"
+                url = m.group(0)
                 url_printed = True
                 print()
                 print(_c(_BOLD + _GREEN, "=" * 56))
